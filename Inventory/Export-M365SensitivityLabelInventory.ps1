@@ -125,7 +125,7 @@ function Invoke-WithRetry {
 # Modules
 # --------------------------
 Import-Module Microsoft.Online.SharePoint.PowerShell -ErrorAction Stop
-Import-Module PnP.PowerShell -ErrorAction Stop
+#Import-Module PnP.PowerShell -ErrorAction Stop
 
 $adminUrl = "https://$TenantName-admin.sharepoint.com"
 

@@ -200,6 +200,22 @@ $pwd = Read-Host "PFX password" -AsSecureString
 
 ***
 
+# What your actual working values look like for Synozur
+
+```powershell
+$pwd = Read-Host "PFX password" -AsSecureString
+
+.\Export-M365SensitivityLabelInventory.ps1 `
+  -TenantName "synozur" `
+  -ClientId "df7b6a64-8d68-4e75-b15d-2cffc07cb554" `
+  -TenantId  "synozur.onmicrosoft.com" `
+  -CertificatePath ".\cert\spo-inventory.pfx" `
+  -CertificatePassword $pwd `
+  -Resume
+```
+
+***
+
 # Practical guidance (from your use case)
 
 Given what you’re doing (tracking labeling across thousands of sites for Copilot governance):
@@ -239,13 +255,4 @@ Once those are correct, your script will:
 * scale to 2k+ sites
 * and become production-stable
 
-***
 
-## If you want next step
-
-I can give you:
-
-* a **one-time setup script** that creates the app + cert + permissions in 5 minutes
-* OR a **Managed Identity version** if you want this running in Azure without certificates
-
-Just tell me which direction you want.
