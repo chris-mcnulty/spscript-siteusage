@@ -144,8 +144,17 @@ foreach ($site in $sites) {
         -ReturnConnection
 
     # Get libraries
-    $lists = Get-PnPList -Connection $siteConn -Includes "Id","Title","BaseTemplate","RootFolder","DefaultSensitivityLabelForLibrary"
+    #$lists = Get-PnPList -Connection $siteConn -Includes "Id","Title","BaseTemplate","RootFolder","DefaultSensitivityLabelForLibrary"
+    try {
+            $lists = Get-PnPList -Connection $siteConn -Includes "Id","Title","BaseTemplate","RootFolder","DefaultSensitivityLabelForLibrary"
+        }
+        catch {
+            Write-Host ("  ⚠️ Skipping site (no access / archived / restricted): {0}" -f $site.Url) -ForegroundColor Yellow
 
+            Add-Content $ErrorCsvPath ( '"' + (Get-Date -Format s) + '","Site","' + $site.Url + '","","","","","","","ACCESS_DENIED_OR_ARCHIVED"' )
+
+            continue
+        }
     $libs = $lists | Where-Object { $_.BaseTemplate -eq 101 }
 
     foreach ($lib in $libs) {
