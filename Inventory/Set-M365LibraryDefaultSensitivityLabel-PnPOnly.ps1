@@ -79,11 +79,14 @@ function Write-CsvRow($path, $values) {
     Add-Content -Path $path -Value $line
 }
 
-# Resume logic — skip libraries we've already acted on.
+# Resume logic — skip libraries we've already reached a terminal state for.
+# Only Set / AlreadySet are terminal. WouldSet (from -WhatIf) and
+# SkippedExistingLabel (depends on -OverwriteExisting) must NOT be cached,
+# so a follow-up apply or -OverwriteExisting run re-evaluates them.
 $processedKeys = @{}
 if ($Resume -and (Test-Path $OutputCsvPath)) {
     Import-Csv $OutputCsvPath | ForEach-Object {
-        if ($_.Action -in @("Set","AlreadySet","WouldSet","SkippedExistingLabel")) {
+        if ($_.Action -in @("Set","AlreadySet")) {
             $k = "$($_.SiteUrl)|$($_.LibraryId)"
             $processedKeys[$k] = $true
         }

@@ -26,9 +26,15 @@ script when that is not viable (small tenants, targeted libraries,
 incremental rollout, etc.).
 
 .NOTES
-Throttling: 429 / 503 responses are retried with Retry-After.
-Resume:     re-running with -Resume skips files already logged as
-            Labeled / AlreadyLabeled / WouldLabel in $OutputCsvPath.
+Throttling: 429 / 503 responses are retried. The Retry-After response
+            header is honored when surfaced by the underlying call;
+            otherwise the script falls back to exponential backoff
+            (2,4,8,... capped at 60s) for up to 5 attempts.
+Resume:     re-running with -Resume skips files already in a terminal
+            state (Labeled or AlreadyLabeled) in $OutputCsvPath.
+            Non-terminal rows (WouldLabel from -WhatIf,
+            SkippedExistingLabel from a run without -OverwriteExisting)
+            are intentionally re-evaluated on the next run.
 #>
 [CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium')]
 param(
@@ -111,11 +117,13 @@ function Write-CsvRow($path, $values) {
     Add-Content -Path $path -Value $line
 }
 
-# Resume cache: keyed by DriveId|ItemId
+# Resume cache: keyed by DriveId|ItemId. Only terminal actions are cached so
+# that a re-run with -OverwriteExisting (or a real run following a -WhatIf
+# dry run) re-evaluates non-terminal rows like WouldLabel / SkippedExistingLabel.
 $processedItems = @{}
 if ($Resume -and (Test-Path $OutputCsvPath)) {
     Import-Csv $OutputCsvPath | ForEach-Object {
-        if ($_.Action -in @("Labeled","AlreadyLabeled","WouldLabel","SkippedExistingLabel")) {
+        if ($_.Action -in @("Labeled","AlreadyLabeled")) {
             $processedItems["$($_.DriveId)|$($_.ItemId)"] = $true
         }
     }
@@ -177,8 +185,32 @@ function Invoke-Graph {
             $msg = $_.Exception.Message
             $isThrottle = $msg -match "429|503|throttle|Too Many Requests|Service Unavailable"
             if ($isThrottle -and $attempt -lt 5) {
-                $wait = [Math]::Min(60, [Math]::Pow(2, $attempt))
-                Write-Host ("    [throttle] sleeping {0}s..." -f $wait) -ForegroundColor DarkYellow
+                # Honor Retry-After when present on the response; otherwise back off exponentially.
+                $wait = $null
+                try {
+                    $resp = $_.Exception.PSObject.Properties['Response']
+                    if ($resp -and $resp.Value -and $resp.Value.Headers) {
+                        $ra = $resp.Value.Headers['Retry-After']
+                        if (-not $ra) { $ra = $resp.Value.Headers.RetryAfter }
+                        if ($ra) {
+                            $raStr = [string]$ra
+                            $sec = 0
+                            if ([int]::TryParse($raStr, [ref]$sec) -and $sec -gt 0) {
+                                $wait = [Math]::Min(300, $sec)
+                            }
+                        }
+                    }
+                } catch { }
+                if (-not $wait) {
+                    # Fallback: also try to parse "Retry-After: N" from the exception text itself.
+                    if ($msg -match "Retry-After[^\d]*([0-9]+)") {
+                        $wait = [Math]::Min(300, [int]$Matches[1])
+                    }
+                }
+                if (-not $wait) {
+                    $wait = [int][Math]::Min(60, [Math]::Pow(2, $attempt))
+                }
+                Write-Host ("    [throttle] sleeping {0}s (attempt {1}/5)..." -f $wait, $attempt) -ForegroundColor DarkYellow
                 Start-Sleep -Seconds $wait
                 continue
             }
