@@ -1,8 +1,19 @@
 <#
 .SYNOPSIS
 Creates an Entra app registration + service principal, generates a self-signed certificate (PFX+CER),
-uploads the cert to the app (keyCredentials), grants SharePoint application permission Sites.FullControl.All,
-and outputs the exact values needed to run the inventory script.
+uploads the cert to the app (keyCredentials), grants the full application-permission set used by every
+script in this folder (inventory, library-default label, file label, site container label), and outputs
+the exact values needed to run the scripts.
+
+GRANTS (Application, admin-consented):
+  SharePoint Online:
+    - Sites.FullControl.All                        (inventory enumeration + Set-PnPList)
+  Microsoft Graph:
+    - Sites.FullControl.All                        (Set-PnPSite -SensitivityLabel)
+    - Files.ReadWrite.All                          (file-level assignSensitivityLabel)
+    - InformationProtectionPolicy.Read.All         (resolve label GUIDs -> display names)
+    - User.Read.All                                (scope label policy lookup to a user under app-only)
+    - Group.ReadWrite.All                          (sync container label to backing M365 group; pass -SkipGroupReadWrite to omit)
 
 REQUIRES
 - PowerShell 7+ recommended
@@ -39,7 +50,12 @@ param(
 
     # Optional: attempt to assign Entra directory role "SharePoint Administrator" to the service principal
     [Parameter(Mandatory=$false)]
-    [switch]$AssignSharePointAdminRole
+    [switch]$AssignSharePointAdminRole,
+
+    # Skip granting Graph Group.ReadWrite.All. Container label assignment still works for the site
+    # itself, but won't synchronize to the backing M365 Group object for Teams/Group-connected sites.
+    [Parameter(Mandatory=$false)]
+    [switch]$SkipGroupReadWrite
 )
 
 Set-StrictMode -Version Latest
@@ -115,25 +131,54 @@ if ($appCurrent.KeyCredentials) { $existing = @($appCurrent.KeyCredentials) }
 
 Update-MgApplication -ApplicationId $app.Id -KeyCredentials ($existing + $keyCred)
 
-# ---------- 5) Grant SharePoint application permission Sites.FullControl.All ----------
-# SharePoint Online resource in Entra is the "Office 365 SharePoint Online" service principal appId:
-# 00000003-0000-0ff1-ce00-000000000000 (SharePoint) — we locate it and then locate the Sites.FullControl.All appRole.
-Write-Host "Granting SharePoint application permission Sites.FullControl.All..." -ForegroundColor Cyan
-$spoResourceSp = Get-MgServicePrincipal -Filter "appId eq '00000003-0000-0ff1-ce00-000000000000'"
+# ---------- 5) Grant application permissions (admin-consented) ----------
+# Resource service principals are located by their well-known appIds:
+#   00000003-0000-0ff1-ce00-000000000000 — Office 365 SharePoint Online
+#   00000003-0000-0000-c000-000000000000 — Microsoft Graph
+$permissions = @(
+    @{ ResourceAppId = "00000003-0000-0ff1-ce00-000000000000"; ResourceName = "SharePoint Online";  Role = "Sites.FullControl.All" }
+    @{ ResourceAppId = "00000003-0000-0000-c000-000000000000"; ResourceName = "Microsoft Graph";    Role = "Sites.FullControl.All" }
+    @{ ResourceAppId = "00000003-0000-0000-c000-000000000000"; ResourceName = "Microsoft Graph";    Role = "Files.ReadWrite.All" }
+    @{ ResourceAppId = "00000003-0000-0000-c000-000000000000"; ResourceName = "Microsoft Graph";    Role = "InformationProtectionPolicy.Read.All" }
+    @{ ResourceAppId = "00000003-0000-0000-c000-000000000000"; ResourceName = "Microsoft Graph";    Role = "User.Read.All" }
+)
+if (-not $SkipGroupReadWrite) {
+    $permissions += @{ ResourceAppId = "00000003-0000-0000-c000-000000000000"; ResourceName = "Microsoft Graph"; Role = "Group.ReadWrite.All" }
+}
 
-if (-not $spoResourceSp) { throw "Could not find SharePoint service principal in this tenant." }
+Write-Host "Granting application permissions..." -ForegroundColor Cyan
 
-$appRole = $spoResourceSp.AppRoles |
-    Where-Object { $_.Value -eq "Sites.FullControl.All" -and ($_.AllowedMemberTypes -contains "Application") } |
-    Select-Object -First 1
+$resourceSpCache = @{}
+$existingAssignments = Get-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $sp.Id
 
-if (-not $appRole) { throw "Could not find AppRole 'Sites.FullControl.All' on the SharePoint service principal." }
+foreach ($perm in $permissions) {
+    $resAppId = $perm.ResourceAppId
 
-New-MgServicePrincipalAppRoleAssignment `
-    -ServicePrincipalId $sp.Id `
-    -PrincipalId $sp.Id `
-    -ResourceId $spoResourceSp.Id `
-    -AppRoleId $appRole.Id | Out-Null
+    if (-not $resourceSpCache.ContainsKey($resAppId)) {
+        $resSp = Get-MgServicePrincipal -Filter "appId eq '$resAppId'"
+        if (-not $resSp) { throw "Could not find service principal for $($perm.ResourceName) (appId $resAppId) in this tenant." }
+        $resourceSpCache[$resAppId] = $resSp
+    }
+    $resSp = $resourceSpCache[$resAppId]
+
+    $role = $resSp.AppRoles |
+        Where-Object { $_.Value -eq $perm.Role -and ($_.AllowedMemberTypes -contains "Application") } |
+        Select-Object -First 1
+    if (-not $role) { throw "Could not find AppRole '$($perm.Role)' on $($perm.ResourceName) service principal." }
+
+    $already = $existingAssignments | Where-Object { $_.ResourceId -eq $resSp.Id -and $_.AppRoleId -eq $role.Id }
+    if ($already) {
+        Write-Host ("  [=] {0} :: {1} (already granted)" -f $perm.ResourceName, $perm.Role) -ForegroundColor DarkGray
+        continue
+    }
+
+    New-MgServicePrincipalAppRoleAssignment `
+        -ServicePrincipalId $sp.Id `
+        -PrincipalId $sp.Id `
+        -ResourceId $resSp.Id `
+        -AppRoleId $role.Id | Out-Null
+    Write-Host ("  [+] {0} :: {1}" -f $perm.ResourceName, $perm.Role) -ForegroundColor Green
+}
 
 # ---------- 6) Optional: assign Entra role "SharePoint Administrator" ----------
 if ($AssignSharePointAdminRole) {

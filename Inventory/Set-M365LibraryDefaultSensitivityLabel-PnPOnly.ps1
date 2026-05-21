@@ -38,6 +38,12 @@ param(
     # Skip items already recorded in $OutputCsvPath as Action=Set or Action=AlreadySet.
     [switch]$Resume,
 
+    # UPN of a licensed user whose published-label set is used to resolve GUIDs -> display names
+    # in the audit CSV / console output. Required when running app-only because
+    # Get-PnPAvailableSensitivityLabel has no user context otherwise. Needs Graph
+    # InformationProtectionPolicy.Read.All + User.Read.All (Application) on this app.
+    [string]$LabelOwnerUpn,
+
     # Optional filter: only process site URLs matching this wildcard (e.g. "*/sites/Finance*").
     [string]$SiteUrlLike
 )
@@ -129,12 +135,20 @@ $adminConn = Connect-PnPOnline `
 # --------------------------
 $labelMap = @{}
 try {
-    $labels = Get-PnPAvailableSensitivityLabel -Connection $adminConn
+    if ($LabelOwnerUpn) {
+        $labels = Get-PnPAvailableSensitivityLabel -Connection $adminConn -User $LabelOwnerUpn
+    } else {
+        $labels = Get-PnPAvailableSensitivityLabel -Connection $adminConn
+    }
     foreach ($l in $labels) {
         $labelMap[$l.Id.ToString().ToLower()] = $l.DisplayName
     }
+    Write-Host ("Loaded {0} label name(s) for resolution." -f $labelMap.Count) -ForegroundColor DarkGray
 } catch {
-    Write-Host "Label name mapping unavailable; will log GUIDs only." -ForegroundColor Yellow
+    Write-Host ("Label name mapping unavailable; will log GUIDs only. ({0})" -f $_.Exception.Message) -ForegroundColor Yellow
+    if (-not $LabelOwnerUpn) {
+        Write-Host "Tip: pass -LabelOwnerUpn <user@domain> so app-only auth has a label-policy scope to read." -ForegroundColor Yellow
+    }
 }
 
 function Resolve-LabelName([string]$id) {
