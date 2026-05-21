@@ -26,10 +26,16 @@ param(
     [bool]$IncludeOneDriveSites = $false,
     [bool]$IncludeHiddenLibraries = $false,
 
-    # If $true, replace an existing different label. If $false, only set when the library has no default label.
+    # If $true, replace an existing different label. If $false, only set when the site/library has no label.
     [switch]$OverwriteExisting,
 
-    # Skip libraries already recorded in $OutputCsvPath as Action=Set or Action=AlreadySet.
+    # Skip the site-level container label pass (only set library defaults).
+    [switch]$SkipSiteLevel,
+
+    # Skip the per-library default-label pass (only set site container labels).
+    [switch]$SkipLibraries,
+
+    # Skip items already recorded in $OutputCsvPath as Action=Set or Action=AlreadySet.
     [switch]$Resume,
 
     # Optional filter: only process site URLs matching this wildcard (e.g. "*/sites/Finance*").
@@ -38,6 +44,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+
+if ($SkipSiteLevel -and $SkipLibraries) {
+    throw "Both -SkipSiteLevel and -SkipLibraries were specified; nothing to do."
+}
 
 Import-Module PnP.PowerShell -ErrorAction Stop
 
@@ -54,14 +64,20 @@ $DefaultLabelId = $labelGuid.ToString()
 # CSV Setup
 # --------------------------
 $headers = @(
-    "Timestamp","SiteUrl","LibraryTitle","LibraryId","LibraryServerRelativeUrl",
+    "Timestamp","Scope","SiteUrl","LibraryTitle","LibraryId","LibraryServerRelativeUrl",
     "PreviousLabelId","PreviousLabelName","TargetLabelId","TargetLabelName",
     "Action","Detail"
 )
 $errorHeaders = @("Timestamp","Scope","SiteUrl","LibraryTitle","Operation","Error")
+$expectedHeader = ($headers -join ",")
 
-if (!(Test-Path $OutputCsvPath)) {
-    ($headers -join ",") | Out-File $OutputCsvPath
+if (Test-Path $OutputCsvPath) {
+    $existingHeader = Get-Content $OutputCsvPath -TotalCount 1
+    if ($existingHeader -ne $expectedHeader) {
+        throw "Existing CSV '$OutputCsvPath' has an older schema (missing 'Scope' column). Delete it or specify a new -OutputCsvPath."
+    }
+} else {
+    $expectedHeader | Out-File $OutputCsvPath
 }
 if (!(Test-Path $ErrorCsvPath)) {
     ($errorHeaders -join ",") | Out-File $ErrorCsvPath
@@ -79,7 +95,7 @@ function Write-CsvRow($path, $values) {
     Add-Content -Path $path -Value $line
 }
 
-# Resume logic — skip libraries we've already reached a terminal state for.
+# Resume logic — skip rows we've already reached a terminal state for.
 # Only Set / AlreadySet are terminal. WouldSet (from -WhatIf) and
 # SkippedExistingLabel (depends on -OverwriteExisting) must NOT be cached,
 # so a follow-up apply or -OverwriteExisting run re-evaluates them.
@@ -87,7 +103,8 @@ $processedKeys = @{}
 if ($Resume -and (Test-Path $OutputCsvPath)) {
     Import-Csv $OutputCsvPath | ForEach-Object {
         if ($_.Action -in @("Set","AlreadySet")) {
-            $k = "$($_.SiteUrl)|$($_.LibraryId)"
+            $scope = if ($_.PSObject.Properties.Name -contains "Scope" -and $_.Scope) { $_.Scope } else { "Library" }
+            $k = if ($scope -eq "Site") { "$($_.SiteUrl)|__SITE__" } else { "$($_.SiteUrl)|$($_.LibraryId)" }
             $processedKeys[$k] = $true
         }
     }
@@ -144,11 +161,27 @@ if ($SiteUrlLike) {
     $sites = $sites | Where-Object { $_.Url -like $SiteUrlLike }
 }
 
-$totalSites = $sites.Count
-$siteIndex  = 0
-$libsSeen   = 0
-$libsSet    = 0
-$libsSkipped= 0
+$totalSites    = $sites.Count
+$siteIndex     = 0
+$sitesLabelSet     = 0
+$sitesLabelSkipped = 0
+$sitesLabelError   = 0
+$libsSeen      = 0
+$libsSet       = 0
+$libsSkipped   = 0
+
+function Get-SitePreviousLabel($obj) {
+    if ($null -eq $obj) { return "" }
+    foreach ($prop in @("SensitivityLabel2", "SensitivityLabel")) {
+        if ($obj.PSObject.Properties.Name -contains $prop) {
+            $v = [string]$obj.$prop
+            if ($v -and $v -ne "00000000-0000-0000-0000-000000000000") {
+                return $v
+            }
+        }
+    }
+    return ""
+}
 
 Write-Host ("Sites to process: {0}" -f $totalSites) -ForegroundColor Cyan
 
@@ -173,6 +206,144 @@ foreach ($site in $sites) {
     catch {
         Write-Host ("  Cannot connect to site: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
         Write-CsvRow $ErrorCsvPath @((Get-Date -Format s), "Site", $site.Url, "", "ConnectSite", $_.Exception.Message)
+        continue
+    }
+
+    # --------------------------
+    # Site-level container label
+    # --------------------------
+    if (-not $SkipSiteLevel) {
+        $siteKey = "$($site.Url)|__SITE__"
+        if ($processedKeys.ContainsKey($siteKey)) {
+            Write-Host ("  [site] [skip-resume]") -ForegroundColor DarkGray
+        }
+        else {
+            $sitePrev = Get-SitePreviousLabel $site
+            $siteLabelDetermined = [bool]$sitePrev
+            $siteLabelLookupFailed = $false
+            $siteLabelLookupErrors = @()
+
+            if (-not $siteLabelDetermined) {
+                # Use a reliable tenant-level lookup before falling back to the site connection.
+                try {
+                    $tenantSite = Get-PnPTenantSite -Connection $adminConn -Identity $site.Url
+                    if ($tenantSite) {
+                        if ($tenantSite.PSObject.Properties.Name -contains "SensitivityLabel") {
+                            $v = [string]$tenantSite.SensitivityLabel
+                            if ($v -and $v -ne "00000000-0000-0000-0000-000000000000") {
+                                $sitePrev = $v
+                                $siteLabelDetermined = $true
+                            }
+                        }
+                        if ((-not $siteLabelDetermined) -and ($tenantSite.PSObject.Properties.Name -contains "SensitivityLabel2")) {
+                            $v = [string]$tenantSite.SensitivityLabel2
+                            if ($v -and $v -ne "00000000-0000-0000-0000-000000000000") {
+                                $sitePrev = $v
+                                $siteLabelDetermined = $true
+                            }
+                        }
+                        if (-not $siteLabelDetermined) {
+                            $siteLabelDetermined = $true
+                        }
+                    }
+                }
+                catch {
+                    $siteLabelLookupFailed = $true
+                    $siteLabelLookupErrors += $_.Exception.Message
+                }
+            }
+
+            if (-not $siteLabelDetermined) {
+                # Fall back to reading from the site connection in case the tenant object lacks the property.
+                try {
+                    $siteObj = Get-PnPSite -Connection $siteConn -Includes "SensitivityLabelId"
+                    if ($siteObj -and $siteObj.PSObject.Properties.Name -contains "SensitivityLabelId") {
+                        $v = [string]$siteObj.SensitivityLabelId
+                        if ($v -and $v -ne "00000000-0000-0000-0000-000000000000") { $sitePrev = $v }
+                        $siteLabelDetermined = $true
+                    }
+                }
+                catch {
+                    $siteLabelLookupFailed = $true
+                    $siteLabelLookupErrors += $_.Exception.Message
+                }
+            }
+
+            $sitePrevName = Resolve-LabelName $sitePrev
+
+            $siteAction = ""
+            $siteDetail = ""
+
+            if (-not $siteLabelDetermined) {
+                $siteAction = "SkippedUnknownExistingLabel"
+                $siteDetail = if ($siteLabelLookupFailed -and $siteLabelLookupErrors.Count -gt 0) {
+                    "Unable to determine current site label; skipped to avoid overwriting existing label. " + ($siteLabelLookupErrors -join " | ")
+                } else {
+                    "Unable to determine current site label; skipped to avoid overwriting existing label."
+                }
+                $sitesLabelSkipped++
+                Write-Host ("  [site][!] unable to determine current label; skipping") -ForegroundColor Yellow
+                if ($siteLabelLookupFailed -and $siteLabelLookupErrors.Count -gt 0) {
+                    Write-CsvRow $ErrorCsvPath @((Get-Date -Format s), "Site", $site.Url, "", "GetSiteSensitivityLabel", ($siteLabelLookupErrors -join " | "))
+                }
+            }
+            else {
+                $siteMatches      = ($sitePrev -and ($sitePrev.ToLower() -eq $DefaultLabelId.ToLower()))
+                $siteHasDifferent = ($sitePrev -and -not $siteMatches)
+
+                if ($siteMatches) {
+                    $siteAction = "AlreadySet"
+                    $sitesLabelSkipped++
+                    Write-Host ("  [site][=] already has target label") -ForegroundColor DarkGreen
+                }
+                elseif ($siteHasDifferent -and -not $OverwriteExisting) {
+                    $siteAction = "SkippedExistingLabel"
+                    $siteDetail = "Site has a different label; pass -OverwriteExisting to replace."
+                    $sitesLabelSkipped++
+                    Write-Host ("  [site][!] has different label: {0}" -f ($sitePrevName ? $sitePrevName : $sitePrev)) -ForegroundColor Yellow
+                }
+                else {
+                    if ($PSCmdlet.ShouldProcess($site.Url, "Set Site SensitivityLabel -> $DefaultLabelId")) {
+                        try {
+                            Set-PnPSite -Connection $siteConn -SensitivityLabel $DefaultLabelId | Out-Null
+                            $siteAction = "Set"
+                            $sitesLabelSet++
+                            Write-Host ("  [site][+] -> {0}" -f ($targetLabelName ? $targetLabelName : $DefaultLabelId)) -ForegroundColor Green
+                        }
+                        catch {
+                            $siteAction = "Error"
+                            $siteDetail = $_.Exception.Message
+                            $sitesLabelError++
+                            Write-Host ("  [site][x] ERROR: {0}" -f $_.Exception.Message) -ForegroundColor Red
+                            Write-CsvRow $ErrorCsvPath @((Get-Date -Format s), "Site", $site.Url, "", "SetSiteSensitivityLabel", $_.Exception.Message)
+                        }
+                    }
+                    else {
+                        $siteAction = "WouldSet"
+                        $siteDetail = "WhatIf"
+                        Write-Host ("  [site][?] would set site label") -ForegroundColor DarkCyan
+                    }
+                }
+            }
+
+            Write-CsvRow $OutputCsvPath @(
+                (Get-Date -Format s),
+                "Site",
+                $site.Url,
+                "",
+                "",
+                "",
+                $sitePrev,
+                $sitePrevName,
+                $DefaultLabelId,
+                $targetLabelName,
+                $siteAction,
+                $siteDetail
+            )
+        }
+    }
+
+    if ($SkipLibraries) {
         continue
     }
 
@@ -254,6 +425,7 @@ foreach ($site in $sites) {
 
         Write-CsvRow $OutputCsvPath @(
             (Get-Date -Format s),
+            "Library",
             $site.Url,
             $libTitle,
             $libId,
@@ -268,7 +440,7 @@ foreach ($site in $sites) {
     }
 
     if (($siteIndex % 10) -eq 0) {
-        Write-Host ("--- Progress: {0}/{1} sites, libs seen={2}, set={3}, skipped={4} ---" -f $siteIndex, $totalSites, $libsSeen, $libsSet, $libsSkipped) -ForegroundColor Green
+        Write-Host ("--- Progress: {0}/{1} sites, site-labels set={2}, libs seen={3}, set={4}, skipped={5} ---" -f $siteIndex, $totalSites, $sitesLabelSet, $libsSeen, $libsSet, $libsSkipped) -ForegroundColor Green
     }
 }
 
@@ -278,10 +450,13 @@ foreach ($site in $sites) {
 Write-Host ""
 Write-Host "====================================" -ForegroundColor Green
 Write-Host "Apply complete"
-Write-Host ("Sites processed     : {0}" -f $siteIndex)
-Write-Host ("Libraries evaluated : {0}" -f $libsSeen)
-Write-Host ("Libraries set       : {0}" -f $libsSet)
-Write-Host ("Libraries skipped   : {0}" -f $libsSkipped)
-Write-Host ("Audit log           : {0}" -f $OutputCsvPath)
-Write-Host ("Error log           : {0}" -f $ErrorCsvPath)
+Write-Host ("Sites processed       : {0}" -f $siteIndex)
+Write-Host ("Site labels set       : {0}" -f $sitesLabelSet)
+Write-Host ("Site labels skipped   : {0}" -f $sitesLabelSkipped)
+Write-Host ("Site label errors     : {0}" -f $sitesLabelError)
+Write-Host ("Libraries evaluated   : {0}" -f $libsSeen)
+Write-Host ("Libraries set         : {0}" -f $libsSet)
+Write-Host ("Libraries skipped     : {0}" -f $libsSkipped)
+Write-Host ("Audit log             : {0}" -f $OutputCsvPath)
+Write-Host ("Error log             : {0}" -f $ErrorCsvPath)
 Write-Host "===================================="
