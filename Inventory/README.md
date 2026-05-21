@@ -54,7 +54,9 @@ Specifically, it:
 - Grants the full application-permission set on the service principal:
   SharePoint `Sites.FullControl.All`, Graph `Sites.FullControl.All`,
   `Files.ReadWrite.All`, `InformationProtectionPolicy.Read.All`,
-  `User.Read.All`, and (unless `-SkipGroupReadWrite`) `Group.ReadWrite.All`.
+  `User.Read.All`, and `Group.ReadWrite.All` by default. In
+  `Setup-SPOInventoryApp.ps1`, `Group.ReadWrite.All` is omitted only when you
+  pass `-SkipGroupReadWrite`.
 - Outputs the exact values you'll paste into the inventory and apply runs:
   **ClientId**, **TenantId**, **CertificatePath**, **CertificateCer**.
 
