@@ -535,7 +535,7 @@ interrupted run picks up where it left off.
 ## References
 
 - [Enable sensitivity labels for files in SharePoint and OneDrive](https://learn.microsoft.com/en-us/purview/sensitivity-labels-sharepoint-onedrive-files)
-- [Auto-labeling for PDFs + `Set-SPOTenant -EnableSensitivityLabelforPDF`](https://learn.microsoft.com/en-us/purview/sensitivity-labels-sharepoint-onedrive-files)
+- [Auto-labeling for PDFs + `Set-SPOTenant -EnableSensitivityLabelforPDF`](https://learn.microsoft.com/en-us/powershell/module/sharepoint-online/set-spotenant?view=sharepoint-ps#-enablesensitivitylabelforpdf)
 - [PnP.PowerShell `Get-PnPAvailableSensitivityLabel`](https://pnp.github.io/powershell/cmdlets/Get-PnPAvailableSensitivityLabel.html)
 - [PnP.PowerShell `Set-PnPList -DefaultSensitivityLabelForLibrary`](https://pnp.github.io/powershell/cmdlets/Set-PnPList.html)
 - [Graph `driveItem: assignSensitivityLabel`](https://learn.microsoft.com/en-us/graph/api/driveitem-assignsensitivitylabel)
