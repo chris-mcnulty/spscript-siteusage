@@ -149,7 +149,7 @@ if (-not $SkipGroupReadWrite) {
 Write-Host "Granting application permissions..." -ForegroundColor Cyan
 
 $resourceSpCache = @{}
-$existingAssignments = Get-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $sp.Id
+$existingAssignments = Get-MgServicePrincipalAppRoleAssignment -ServicePrincipalId $sp.Id -All
 
 foreach ($perm in $permissions) {
     $resAppId = $perm.ResourceAppId
