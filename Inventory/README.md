@@ -1,6 +1,6 @@
 # SharePoint Sensitivity Label Inventory & Apply (PnP.PowerShell)
 
-This folder contains four scripts that together let you stand up an app
+This folder contains four main scripts that together let you stand up an app
 registration, inventory sensitivity labels across the tenant, and apply
 default labels at the library level and explicit labels at the file level.
 
