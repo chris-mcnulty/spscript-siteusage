@@ -220,9 +220,9 @@ that).
 $pwd = Read-Host "PFX password" -AsSecureString
 
 .\Set-M365LibraryDefaultSensitivityLabel-PnPOnly.ps1 `
-  -TenantName "synozur" `
-  -ClientId "df7b6a64-8d68-4e75-b15d-2cffc07cb554" `
-  -Tenant "synozur.onmicrosoft.com" `
+  -TenantName "contoso" `
+  -ClientId "<app-client-id>" `
+  -Tenant "contoso.onmicrosoft.com" `
   -CertificatePath ".\cert\spo-inventory.pfx" `
   -CertificatePassword $pwd `
   -DefaultLabelId "00000000-0000-0000-0000-000000000000" `
