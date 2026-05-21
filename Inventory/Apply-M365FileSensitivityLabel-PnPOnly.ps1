@@ -75,6 +75,12 @@ param(
 
     [string]$SiteUrlLike,
 
+    # UPN of a licensed user whose published-label set is used to resolve GUIDs -> display names
+    # in the audit CSV / console output. Required when running app-only because
+    # Get-PnPAvailableSensitivityLabel has no user context otherwise. Needs Graph
+    # InformationProtectionPolicy.Read.All + User.Read.All (Application) on this app.
+    [string]$LabelOwnerUpn,
+
     # Cap per library to throttle very large rollouts (0 = no cap).
     [int]$MaxFilesPerLibrary = 0
 )
@@ -104,8 +110,8 @@ $headers = @(
 )
 $errorHeaders = @("Timestamp","Scope","SiteUrl","LibraryTitle","Operation","Error")
 
-if (!(Test-Path $OutputCsvPath)) { ($headers      -join ",") | Out-File $OutputCsvPath }
-if (!(Test-Path $ErrorCsvPath))  { ($errorHeaders -join ",") | Out-File $ErrorCsvPath  }
+if (!(Test-Path $OutputCsvPath)) { ($headers      -join ",") | Out-File $OutputCsvPath -WhatIf:$false -Confirm:$false }
+if (!(Test-Path $ErrorCsvPath))  { ($errorHeaders -join ",") | Out-File $ErrorCsvPath  -WhatIf:$false -Confirm:$false }
 
 function CsvEscape([object]$v) {
     if ($null -eq $v) { return '""' }
@@ -114,7 +120,19 @@ function CsvEscape([object]$v) {
 }
 function Write-CsvRow($path, $values) {
     $line = ($values | ForEach-Object { CsvEscape $_ }) -join ","
-    Add-Content -Path $path -Value $line
+    # Audit writes must bypass -WhatIf / -Confirm so the CSV records WouldLabel rows during preview runs.
+    Add-Content -Path $path -Value $line -WhatIf:$false -Confirm:$false
+}
+
+function Get-LabelDisplayProp($l) {
+    if ($null -eq $l) { return "" }
+    foreach ($prop in @("DisplayName","Name","displayName","name")) {
+        if ($l.PSObject.Properties.Name -contains $prop) {
+            $v = [string]$l.$prop
+            if ($v) { return $v }
+        }
+    }
+    return ""
 }
 
 # Resume cache: keyed by DriveId|ItemId. Only terminal actions are cached so
@@ -147,10 +165,22 @@ $adminConn = Connect-PnPOnline `
 # --------------------------
 $labelMap = @{}
 try {
-    $labels = Get-PnPAvailableSensitivityLabel -Connection $adminConn
-    foreach ($l in $labels) { $labelMap[$l.Id.ToString().ToLower()] = $l.DisplayName }
+    if ($LabelOwnerUpn) {
+        $labels = Get-PnPAvailableSensitivityLabel -Connection $adminConn -User $LabelOwnerUpn
+    } else {
+        $labels = Get-PnPAvailableSensitivityLabel -Connection $adminConn
+    }
+    foreach ($l in $labels) {
+        if ($l.PSObject.Properties.Name -contains "Id") {
+            $labelMap[([string]$l.Id).ToLower()] = (Get-LabelDisplayProp $l)
+        }
+    }
+    Write-Host ("Loaded {0} label name(s) for resolution." -f $labelMap.Count) -ForegroundColor DarkGray
 } catch {
-    Write-Host "Label name mapping unavailable; logging GUIDs only." -ForegroundColor Yellow
+    Write-Host ("Label name mapping unavailable; logging GUIDs only. ({0})" -f $_.Exception.Message) -ForegroundColor Yellow
+    if (-not $LabelOwnerUpn) {
+        Write-Host "Tip: pass -LabelOwnerUpn <user@domain> so app-only auth has a label-policy scope to read." -ForegroundColor Yellow
+    }
 }
 function Resolve-LabelName([string]$id) {
     if ([string]::IsNullOrWhiteSpace($id)) { return "" }

@@ -83,10 +83,10 @@ if (Test-Path $OutputCsvPath) {
         throw "Existing CSV '$OutputCsvPath' has an older schema (missing 'Scope' column). Delete it or specify a new -OutputCsvPath."
     }
 } else {
-    $expectedHeader | Out-File $OutputCsvPath
+    $expectedHeader | Out-File $OutputCsvPath -WhatIf:$false -Confirm:$false
 }
 if (!(Test-Path $ErrorCsvPath)) {
-    ($errorHeaders -join ",") | Out-File $ErrorCsvPath
+    ($errorHeaders -join ",") | Out-File $ErrorCsvPath -WhatIf:$false -Confirm:$false
 }
 
 function CsvEscape([object]$v) {
@@ -98,7 +98,19 @@ function CsvEscape([object]$v) {
 
 function Write-CsvRow($path, $values) {
     $line = ($values | ForEach-Object { CsvEscape $_ }) -join ","
-    Add-Content -Path $path -Value $line
+    # Audit writes must bypass -WhatIf / -Confirm so the CSV records WouldSet rows during preview runs.
+    Add-Content -Path $path -Value $line -WhatIf:$false -Confirm:$false
+}
+
+function Get-LabelDisplayProp($l) {
+    if ($null -eq $l) { return "" }
+    foreach ($prop in @("DisplayName","Name","displayName","name")) {
+        if ($l.PSObject.Properties.Name -contains $prop) {
+            $v = [string]$l.$prop
+            if ($v) { return $v }
+        }
+    }
+    return ""
 }
 
 # Resume logic — skip rows we've already reached a terminal state for.
@@ -141,7 +153,9 @@ try {
         $labels = Get-PnPAvailableSensitivityLabel -Connection $adminConn
     }
     foreach ($l in $labels) {
-        $labelMap[$l.Id.ToString().ToLower()] = $l.DisplayName
+        if ($l.PSObject.Properties.Name -contains "Id") {
+            $labelMap[([string]$l.Id).ToLower()] = (Get-LabelDisplayProp $l)
+        }
     }
     Write-Host ("Loaded {0} label name(s) for resolution." -f $labelMap.Count) -ForegroundColor DarkGray
 } catch {
