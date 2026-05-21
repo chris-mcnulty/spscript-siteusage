@@ -51,8 +51,10 @@ Specifically, it:
 - Generates a self-signed certificate (**PFX + CER**) and exports both.
 - Uploads the certificate to the app registration via **keyCredentials** (so
   you don't upload the `.cer` manually).
-- Grants SharePoint application permission **Sites.FullControl.All** to the
-  new service principal.
+- Grants the full application-permission set on the service principal:
+  SharePoint `Sites.FullControl.All`, Graph `Sites.FullControl.All`,
+  `Files.ReadWrite.All`, `InformationProtectionPolicy.Read.All`,
+  `User.Read.All`, and (unless `-SkipGroupReadWrite`) `Group.ReadWrite.All`.
 - Outputs the exact values you'll paste into the inventory and apply runs:
   **ClientId**, **TenantId**, **CertificatePath**, **CertificateCer**.
 
@@ -107,27 +109,32 @@ When it completes, it prints a "copy these values" block including:
 
 ## Required Entra permissions
 
-### 1) SharePoint permission (set by setup script)
+Both `Setup-SPOInventoryApp.ps1` and `Setup-SPOInventoryQuick.ps1` now grant
+the full permission set below in a single run. Re-running the setup script
+against an existing app is idempotent (already-granted roles are skipped).
 
-The setup script grants the app **Sites.FullControl.All (Application)** for
-SharePoint Online. That covers the inventory script and the library
-default-label apply script.
+### 1) SharePoint Online (Application)
 
-### 2) Microsoft Graph permissions
+| Permission | Used for |
+|---|---|
+| `Sites.FullControl.All` | tenant site enumeration, per-site connect, `Set-PnPList -DefaultSensitivityLabelForLibrary` |
 
-Different scripts need different Graph application permissions. Grant and
-admin-consent these on the same app registration:
+### 2) Microsoft Graph (Application)
 
-| Permission | Inventory | Library default-label apply | File label apply |
-|---|---|---|---|
-| `InformationProtectionPolicy.Read.All` | recommended (label name resolution) | recommended | recommended |
-| `Sites.Read.All` | — | — | **required** (resolve site → drive) |
-| `Files.ReadWrite.All` | — | — | **required** (enumerate driveItems and assign labels) |
+| Permission | Used for |
+|---|---|
+| `Sites.FullControl.All` | `Set-PnPSite -SensitivityLabel` (site container label) |
+| `Files.ReadWrite.All` | file-level `POST /drives/{id}/items/{itemId}/assignSensitivityLabel` |
+| `InformationProtectionPolicy.Read.All` | `Get-PnPAvailableSensitivityLabel` — resolve label GUIDs to display names |
+| `User.Read.All` | scope label-policy lookup to a UPN under app-only auth (`-LabelOwnerUpn`) |
+| `Group.ReadWrite.All` | sync container label to backing M365 Group for Teams/Group-connected sites (omit with `-SkipGroupReadWrite` on the setup script) |
 
-`InformationProtectionPolicy.Read.All` is what `Get-PnPAvailableSensitivityLabel`
-needs to map label GUIDs to display names. Without it, the apply/inventory
+Without `InformationProtectionPolicy.Read.All` + `User.Read.All`, the apply
 scripts will warn "Label name mapping unavailable; logging GUIDs only" and
-all label columns will contain GUIDs only.
+all label-name columns will contain GUIDs only. Without `Files.ReadWrite.All`
+the file-level apply script will 403. Without Graph `Sites.FullControl.All`
+the site container label cannot be set (libraries can still be set via the
+SharePoint permission).
 
 ---
 
