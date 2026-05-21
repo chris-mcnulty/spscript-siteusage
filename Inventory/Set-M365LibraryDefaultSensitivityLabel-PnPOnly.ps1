@@ -219,55 +219,110 @@ foreach ($site in $sites) {
         }
         else {
             $sitePrev = Get-SitePreviousLabel $site
-            if (-not $sitePrev) {
+            $siteLabelDetermined = [bool]$sitePrev
+            $siteLabelLookupFailed = $false
+            $siteLabelLookupErrors = @()
+
+            if (-not $siteLabelDetermined) {
+                # Use a reliable tenant-level lookup before falling back to the site connection.
+                try {
+                    $tenantSite = Get-PnPTenantSite -Connection $adminConn -Identity $site.Url
+                    if ($tenantSite) {
+                        if ($tenantSite.PSObject.Properties.Name -contains "SensitivityLabel") {
+                            $v = [string]$tenantSite.SensitivityLabel
+                            if ($v -and $v -ne "00000000-0000-0000-0000-000000000000") {
+                                $sitePrev = $v
+                                $siteLabelDetermined = $true
+                            }
+                        }
+                        if ((-not $siteLabelDetermined) -and ($tenantSite.PSObject.Properties.Name -contains "SensitivityLabel2")) {
+                            $v = [string]$tenantSite.SensitivityLabel2
+                            if ($v -and $v -ne "00000000-0000-0000-0000-000000000000") {
+                                $sitePrev = $v
+                                $siteLabelDetermined = $true
+                            }
+                        }
+                        if (-not $siteLabelDetermined) {
+                            $siteLabelDetermined = $true
+                        }
+                    }
+                }
+                catch {
+                    $siteLabelLookupFailed = $true
+                    $siteLabelLookupErrors += $_.Exception.Message
+                }
+            }
+
+            if (-not $siteLabelDetermined) {
                 # Fall back to reading from the site connection in case the tenant object lacks the property.
                 try {
                     $siteObj = Get-PnPSite -Connection $siteConn -Includes "SensitivityLabelId"
                     if ($siteObj -and $siteObj.PSObject.Properties.Name -contains "SensitivityLabelId") {
                         $v = [string]$siteObj.SensitivityLabelId
                         if ($v -and $v -ne "00000000-0000-0000-0000-000000000000") { $sitePrev = $v }
+                        $siteLabelDetermined = $true
                     }
-                } catch { }
+                }
+                catch {
+                    $siteLabelLookupFailed = $true
+                    $siteLabelLookupErrors += $_.Exception.Message
+                }
             }
+
             $sitePrevName = Resolve-LabelName $sitePrev
 
             $siteAction = ""
             $siteDetail = ""
 
-            $siteMatches      = ($sitePrev -and ($sitePrev.ToLower() -eq $DefaultLabelId.ToLower()))
-            $siteHasDifferent = ($sitePrev -and -not $siteMatches)
-
-            if ($siteMatches) {
-                $siteAction = "AlreadySet"
+            if (-not $siteLabelDetermined) {
+                $siteAction = "SkippedUnknownExistingLabel"
+                $siteDetail = if ($siteLabelLookupFailed -and $siteLabelLookupErrors.Count -gt 0) {
+                    "Unable to determine current site label; skipped to avoid overwriting existing label. " + ($siteLabelLookupErrors -join " | ")
+                } else {
+                    "Unable to determine current site label; skipped to avoid overwriting existing label."
+                }
                 $sitesLabelSkipped++
-                Write-Host ("  [site][=] already has target label") -ForegroundColor DarkGreen
-            }
-            elseif ($siteHasDifferent -and -not $OverwriteExisting) {
-                $siteAction = "SkippedExistingLabel"
-                $siteDetail = "Site has a different label; pass -OverwriteExisting to replace."
-                $sitesLabelSkipped++
-                Write-Host ("  [site][!] has different label: {0}" -f ($sitePrevName ? $sitePrevName : $sitePrev)) -ForegroundColor Yellow
+                Write-Host ("  [site][!] unable to determine current label; skipping") -ForegroundColor Yellow
+                if ($siteLabelLookupFailed -and $siteLabelLookupErrors.Count -gt 0) {
+                    Write-CsvRow $ErrorCsvPath @((Get-Date -Format s), "Site", $site.Url, "", "GetSiteSensitivityLabel", ($siteLabelLookupErrors -join " | "))
+                }
             }
             else {
-                if ($PSCmdlet.ShouldProcess($site.Url, "Set Site SensitivityLabel -> $DefaultLabelId")) {
-                    try {
-                        Set-PnPSite -Connection $siteConn -SensitivityLabel $DefaultLabelId | Out-Null
-                        $siteAction = "Set"
-                        $sitesLabelSet++
-                        Write-Host ("  [site][+] -> {0}" -f ($targetLabelName ? $targetLabelName : $DefaultLabelId)) -ForegroundColor Green
-                    }
-                    catch {
-                        $siteAction = "Error"
-                        $siteDetail = $_.Exception.Message
-                        $sitesLabelError++
-                        Write-Host ("  [site][x] ERROR: {0}" -f $_.Exception.Message) -ForegroundColor Red
-                        Write-CsvRow $ErrorCsvPath @((Get-Date -Format s), "Site", $site.Url, "", "SetSiteSensitivityLabel", $_.Exception.Message)
-                    }
+                $siteMatches      = ($sitePrev -and ($sitePrev.ToLower() -eq $DefaultLabelId.ToLower()))
+                $siteHasDifferent = ($sitePrev -and -not $siteMatches)
+
+                if ($siteMatches) {
+                    $siteAction = "AlreadySet"
+                    $sitesLabelSkipped++
+                    Write-Host ("  [site][=] already has target label") -ForegroundColor DarkGreen
+                }
+                elseif ($siteHasDifferent -and -not $OverwriteExisting) {
+                    $siteAction = "SkippedExistingLabel"
+                    $siteDetail = "Site has a different label; pass -OverwriteExisting to replace."
+                    $sitesLabelSkipped++
+                    Write-Host ("  [site][!] has different label: {0}" -f ($sitePrevName ? $sitePrevName : $sitePrev)) -ForegroundColor Yellow
                 }
                 else {
-                    $siteAction = "WouldSet"
-                    $siteDetail = "WhatIf"
-                    Write-Host ("  [site][?] would set site label") -ForegroundColor DarkCyan
+                    if ($PSCmdlet.ShouldProcess($site.Url, "Set Site SensitivityLabel -> $DefaultLabelId")) {
+                        try {
+                            Set-PnPSite -Connection $siteConn -SensitivityLabel $DefaultLabelId | Out-Null
+                            $siteAction = "Set"
+                            $sitesLabelSet++
+                            Write-Host ("  [site][+] -> {0}" -f ($targetLabelName ? $targetLabelName : $DefaultLabelId)) -ForegroundColor Green
+                        }
+                        catch {
+                            $siteAction = "Error"
+                            $siteDetail = $_.Exception.Message
+                            $sitesLabelError++
+                            Write-Host ("  [site][x] ERROR: {0}" -f $_.Exception.Message) -ForegroundColor Red
+                            Write-CsvRow $ErrorCsvPath @((Get-Date -Format s), "Site", $site.Url, "", "SetSiteSensitivityLabel", $_.Exception.Message)
+                        }
+                    }
+                    else {
+                        $siteAction = "WouldSet"
+                        $siteDetail = "WhatIf"
+                        Write-Host ("  [site][?] would set site label") -ForegroundColor DarkCyan
+                    }
                 }
             }
 
