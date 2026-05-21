@@ -1,43 +1,63 @@
-# 🔐 SharePoint Sensitivity Label Inventory (PnP.PowerShell)
+# SharePoint Sensitivity Label Inventory & Apply (PnP.PowerShell)
 
-This repo contains two scripts:
+This folder contains four scripts that together let you stand up an app
+registration, inventory sensitivity labels across the tenant, and apply
+default labels at the library level and explicit labels at the file level.
 
-1. **[Setup-SPOInventoryApp.ps1](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=187&web=1&EntityRepresentationId=b0ad99cd-e6dd-477e-9b4a-2685f46239df)** — one-time setup to create the Entra app + cert and grant baseline permissions. 【1-227cf3】  
-2. **[Export-M365SensitivityLabelInventory-PnPOnly.ps1](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1&EntityRepresentationId=58464a48-71e7-483b-9c2d-1a3bca122d82)** — the actual tenant inventory run (PnP-only, with progress output and resume). 【2-547b7b】  
+1. **Setup-SPOInventoryApp.ps1** — one-time setup. Creates the Entra app +
+   certificate and grants baseline SharePoint permissions.
+2. **Export-M365SensitivityLabelInventory-PnPOnly.ps1** — read-only inventory.
+   Enumerates sites and document libraries and exports a CSV with the
+   sensitivity-label signals on each.
+3. **Set-M365LibraryDefaultSensitivityLabel-PnPOnly.ps1** — write. Sets a
+   `DefaultSensitivityLabelForLibrary` on every document library in the
+   tenant (with `-WhatIf`, `-Resume`, and `-OverwriteExisting` support).
+4. **Apply-M365FileSensitivityLabel-PnPOnly.ps1** — write. Applies a
+   sensitivity label to existing files in every document library, either
+   the library's own default label or a single forced `-LabelId`.
 
-The inventory script enumerates SharePoint sites, then enumerates document libraries per site, and exports a CSV with site/library sensitivity label signals. 【2-547b7b】  
+A legacy `Export-M365SensitivityLabelInventory.ps1` (SPO + PnP hybrid) and an
+`exampleAIP.ps1` snippet (tenant `EnableAIPIntegration` toggle) are also kept
+here. Prefer the `-PnPOnly` variants for new work.
 
 ---
 
 ## Table of contents
 
-- #what-the-setup-script-does
-- #prerequisites
-- #one-time-setup-run-the-setup-script
-- #required-entra-permissions
-- #enable-sensitivity-labels-for-sharepointonedrive-required
-- #enable-pdf-support-recommended
-- #run-the-inventory-script-pnp-version
-- #parameters-inventory-script
-- #outputs
-- #runtime-signs-of-life
+- [What the setup script does](#what-the-setup-script-does)
+- [Prerequisites](#prerequisites)
+- [One-time setup (run the setup script)](#one-time-setup-run-the-setup-script)
+- [Required Entra permissions](#required-entra-permissions)
+- [Enable sensitivity labels for SharePoint/OneDrive (required)](#enable-sensitivity-labels-for-sharepointonedrive-required)
+- [Enable PDF support (recommended)](#enable-pdf-support-recommended)
+- [Run the inventory script (PnP version)](#run-the-inventory-script-pnp-version)
+- [Run the library default-label apply script](#run-the-library-default-label-apply-script)
+- [Run the file label apply script](#run-the-file-label-apply-script)
+- [Outputs](#outputs)
+- [Runtime "signs of life"](#runtime-signs-of-life)
 - [Troubleshooting](#troubleshooting)
 
 ---
 
 ## What the setup script does
 
-**[Setup-SPOInventoryApp.ps1](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=187&web=1&EntityRepresentationId=b0ad99cd-e6dd-477e-9b4a-2685f46239df)** automates the full app + certificate bootstrap so you do **not** have to manually create an app or upload a `.cer` in the portal. 【1-227cf3】  
+**Setup-SPOInventoryApp.ps1** automates the full app + certificate bootstrap
+so you do **not** have to manually create an app or upload a `.cer` in the
+portal.
 
-Specifically, it: 【1-227cf3】  
+Specifically, it:
 
-- Creates an **Entra app registration** and **service principal**. 【1-227cf3】  
-- Generates a self-signed certificate (**PFX + CER**) and exports both. 【1-227cf3】  
-- Uploads the certificate to the app registration using **keyCredentials** (so you don’t upload the `.cer` manually). 【1-227cf3】  
-- Grants SharePoint application permission **Sites.FullControl.All** to the new service principal. 【1-227cf3】  
-- Outputs the exact values you’ll paste into the inventory run: **ClientId**, **TenantId**, **CertificatePath**, **CertificateCer**. 【1-227cf3】  
+- Creates an **Entra app registration** and **service principal**.
+- Generates a self-signed certificate (**PFX + CER**) and exports both.
+- Uploads the certificate to the app registration via **keyCredentials** (so
+  you don't upload the `.cer` manually).
+- Grants SharePoint application permission **Sites.FullControl.All** to the
+  new service principal.
+- Outputs the exact values you'll paste into the inventory and apply runs:
+  **ClientId**, **TenantId**, **CertificatePath**, **CertificateCer**.
 
-> Optional: the script includes logic to assign the Entra role **SharePoint Administrator** (tenant scope) if you enable that option in the script. 【1-227cf3】  
+> Optional: the script includes logic to assign the Entra role **SharePoint
+> Administrator** (tenant scope) if you enable that option in the script.
 
 ---
 
@@ -45,103 +65,114 @@ Specifically, it: 【1-227cf3】
 
 ### PowerShell + modules
 
-- **PowerShell 7.4+ is required** for PnP.PowerShell. 【3-d1f9ad】  
-- Install/upgrade PnP.PowerShell: 【3-d1f9ad】  
+- **PowerShell 7.4+ is required** for PnP.PowerShell.
+- Install/upgrade PnP.PowerShell:
 
 ```powershell
 Install-Module PnP.PowerShell -Scope CurrentUser -Force -SkipPublisherCheck
 Import-Module PnP.PowerShell
-````
+```
 
 ### Permissions to run setup
 
-The setup script connects to Microsoft Graph and creates/updates app registrations and app-role assignments.   
-You’ll need an admin identity that can consent and create apps in your tenant. [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=187&web=1)
+The setup script connects to Microsoft Graph and creates/updates app
+registrations and app-role assignments. You'll need an admin identity that
+can consent and create apps in your tenant.
 
-***
+---
 
 ## One-time setup (run the setup script)
 
-Run **[Setup-SPOInventoryApp.ps1](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=187\&web=1\&EntityRepresentationId=b0ad99cd-e6dd-477e-9b4a-2685f46239df)** once to create the app + cert and grant baseline SharePoint permissions. [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=187&web=1)
-
-Example pattern (your parameters may vary based on your local copy of the script): [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=187&web=1)
+Run **Setup-SPOInventoryApp.ps1** once to create the app + cert and grant
+baseline SharePoint permissions.
 
 ```powershell
-# Example: run the setup script (edit parameters in the script if needed)
-.\Setup-SPOInventoryApp.ps1
+.\Setup-SPOInventoryApp.ps1 `
+  -AppName "SPO-Inventory" `
+  -TenantId "<your-tenant-guid>" `
+  -OutDir ".\cert"
 ```
 
-When it completes, it prints a “copy these values” block including: [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=187&web=1)
+When it completes, it prints a "copy these values" block including:
 
-* `ClientId`
-* `TenantId`
-* `CertificatePath` (PFX path)
-* `CertificateCer` (CER path)
+- `ClientId`
+- `TenantId`
+- `CertificatePath` (PFX path)
+- `CertificateCer` (CER path)
 
-> ✅ You do **not** need to upload the `.cer` manually if you used the setup script — it already uploads the cert to Entra. [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=187&web=1)
+> You do **not** need to upload the `.cer` manually if you used the setup
+> script — it already uploads the cert to Entra.
 
-***
+---
 
 ## Required Entra permissions
 
 ### 1) SharePoint permission (set by setup script)
 
-The setup script grants the app **Sites.FullControl.All (Application)** for SharePoint Online. [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=187&web=1)
+The setup script grants the app **Sites.FullControl.All (Application)** for
+SharePoint Online. That covers the inventory script and the library
+default-label apply script.
 
-### 2) Microsoft Graph permission (needed to resolve label names)
+### 2) Microsoft Graph permissions
 
-If you want **label names** (not just label GUIDs), you must grant Graph permissions required by `Get-PnPAvailableSensitivityLabel`. [\[pnp.github.io\]](https://pnp.github.io/powershell/cmdlets/Get-PnPAvailableSensitivityLabel.html), [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1)
+Different scripts need different Graph application permissions. Grant and
+admin-consent these on the same app registration:
 
-PnP documents the required Graph permissions as: [\[pnp.github.io\]](https://pnp.github.io/powershell/cmdlets/Get-PnPAvailableSensitivityLabel.html)
+| Permission | Inventory | Library default-label apply | File label apply |
+|---|---|---|---|
+| `InformationProtectionPolicy.Read.All` | recommended (label name resolution) | recommended | recommended |
+| `Sites.Read.All` | — | — | **required** (resolve site → drive) |
+| `Files.ReadWrite.All` | — | — | **required** (enumerate driveItems and assign labels) |
 
-* **Delegated:** `InformationProtectionPolicy.Read`
-* **Application:** `InformationProtectionPolicy.Read.All`
+`InformationProtectionPolicy.Read.All` is what `Get-PnPAvailableSensitivityLabel`
+needs to map label GUIDs to display names. Without it, the apply/inventory
+scripts will warn "Label name mapping unavailable; logging GUIDs only" and
+all label columns will contain GUIDs only.
 
-Because this inventory runs **app-only** (certificate auth), you want **Application** permission: `InformationProtectionPolicy.Read.All`. [\[pnp.github.io\]](https://pnp.github.io/powershell/cmdlets/Get-PnPAvailableSensitivityLabel.html), [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1), [\[graphpermi...merill.net\]](https://graphpermissions.merill.net/permission/InformationProtectionPolicy.Read.All)
-
-> If you don’t grant this, the script will still export label IDs but will warn: “Label name mapping unavailable; exporting label IDs only.” [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1)
-
-***
+---
 
 ## Enable sensitivity labels for SharePoint/OneDrive (required)
 
-Microsoft Purview requires an explicit enablement step so SharePoint/OneDrive can apply and process sensitivity labels on files (including encrypted files). [\[learn.microsoft.com\]](https://learn.microsoft.com/en-us/purview/sensitivity-labels-sharepoint-onedrive-files)
+Microsoft Purview requires an explicit enablement step so SharePoint/OneDrive
+can apply and process sensitivity labels on files (including encrypted
+files). Enabling sensitivity labels for SharePoint and OneDrive:
 
-From Microsoft guidance, enabling sensitivity labels for SharePoint and OneDrive: [\[learn.microsoft.com\]](https://learn.microsoft.com/en-us/purview/sensitivity-labels-sharepoint-onedrive-files)
+- enables built-in labeling for supported Office files and **PDF files**
+- lets users apply labels in Office for the web and in SharePoint/OneDrive UI
+- allows SharePoint/OneDrive to **process** encrypted labeled content
+  (eDiscovery, search, coauthoring, etc.) once enabled
 
-* enables built-in labeling for supported Office files and **PDF files**
-* lets users apply labels in Office for the web and in SharePoint/OneDrive UI
-* allows SharePoint/OneDrive to **process** encrypted labeled content (eDiscovery, search, coauthoring, etc.) once enabled [\[learn.microsoft.com\]](https://learn.microsoft.com/en-us/purview/sensitivity-labels-sharepoint-onedrive-files)
+**Do this before relying on inventory results — or running the apply
+scripts — for governance decisions.**
 
-**Do this before relying on inventory results for governance decisions.** [\[learn.microsoft.com\]](https://learn.microsoft.com/en-us/purview/sensitivity-labels-sharepoint-onedrive-files)
-
-***
+---
 
 ## Enable PDF support (recommended)
 
-If you want correct coverage for labeled PDFs (and especially for labeling/encryption scenarios), enable PDF label support.
+If you want correct coverage for labeled PDFs (and especially for
+labeling/encryption scenarios), enable PDF label support.
 
 ### Option A — Enable in Purview (UI)
 
-Microsoft describes enabling built-in labeling for supported Office files and **PDF files** in SharePoint/OneDrive as part of the Purview feature enablement. [\[learn.microsoft.com\]](https://learn.microsoft.com/en-us/purview/sensitivity-labels-sharepoint-onedrive-files)
+Microsoft describes enabling built-in labeling for supported Office files and
+**PDF files** in SharePoint/OneDrive as part of the Purview feature
+enablement.
 
 ### Option B — Enable via PowerShell (tenant setting)
-
-Microsoft’s message center guidance notes PDF labeling can be enabled via: [\[m365admin....sontek.net\]](https://m365admin.handsontek.net/microsoft-purview-information-protection-auto-labeling-for-files-at-rest-in-sharepoint-online-can-now-label-pdf-files/)
 
 ```powershell
 Set-SPOTenant -EnableSensitivityLabelforPDF $true
 ```
 
-> Note: the message center guidance indicates this feature can be off by default and calls out a short propagation window after enabling. [\[m365admin....sontek.net\]](https://m365admin.handsontek.net/microsoft-purview-information-protection-auto-labeling-for-files-at-rest-in-sharepoint-online-can-now-label-pdf-files/)
+> Note: this feature can be off by default and there is a short propagation
+> window after enabling.
 
-***
+---
 
 ## Run the inventory script (PnP version)
 
-Use **[Export-M365SensitivityLabelInventory-PnPOnly.ps1](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216\&web=1\&EntityRepresentationId=58464a48-71e7-483b-9c2d-1a3bca122d82)** for the PnP-only inventory run. [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1)
-
-**Cut/paste example:**
+Use **Export-M365SensitivityLabelInventory-PnPOnly.ps1** for the PnP-only
+inventory run.
 
 ```powershell
 $pwd = Read-Host "PFX password" -AsSecureString
@@ -155,85 +186,356 @@ $pwd = Read-Host "PFX password" -AsSecureString
   -Resume
 ```
 
-The script connects to your admin site using `Connect-PnPOnline` with `-ClientId`, `-Tenant`, `-CertificatePath`, and `-CertificatePassword`. [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1)
+The script connects to your admin site using `Connect-PnPOnline` with
+`-ClientId`, `-Tenant`, `-CertificatePath`, and `-CertificatePassword`.
 
-***
+### Parameters
 
-## Parameters (inventory script)
+Required (app-only auth):
 
-The inventory script uses these parameters internally: [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1)
+- `TenantName` — used to build `https://<TenantName>-admin.sharepoint.com`
+- `ClientId` — Entra app (Application/Client ID) used for app-only auth
+- `Tenant` — tenant identifier used by `Connect-PnPOnline`
+- `CertificatePath` — PFX file path used by `Connect-PnPOnline`
+- `CertificatePassword` — SecureString password for the PFX
 
-### Required (app-only auth)
+Optional:
 
-* `TenantName` — used to build `https://<TenantName>-admin.sharepoint.com` [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1)
-* `ClientId` — Entra app (Application/Client ID) used for app-only auth [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1)
-* `Tenant` — tenant identifier used by `Connect-PnPOnline` [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1)
-* `CertificatePath` — PFX file path used by `Connect-PnPOnline` [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1)
-* `CertificatePassword` — SecureString password for the PFX [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1)
+- `IncludeOneDriveSites` — passed through to `Get-PnPTenantSite`
+- `Resume` — read existing CSV and skip already-written rows
 
-### Optional behavior switches
+---
 
-* `IncludeOneDriveSites` — passed to `Get-PnPTenantSite -IncludeOneDriveSites:$IncludeOneDriveSites` [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1)
-* `Resume` — if set, reads existing CSV and skips already-written rows [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1)
+## Run the library default-label apply script
 
-> Repo default behavior: the script is designed so you can exclude OneDrive sites by default by setting `IncludeOneDriveSites` false in your script configuration. [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1)
+Use **Set-M365LibraryDefaultSensitivityLabel-PnPOnly.ps1** to set
+`DefaultSensitivityLabelForLibrary` on every document library across the
+tenant. This is the library-level default that controls what label new files
+inherit; it does **not** label existing files (use the file-label script for
+that).
 
-***
+### Dry run first (recommended)
+
+```powershell
+$pwd = Read-Host "PFX password" -AsSecureString
+
+.\Set-M365LibraryDefaultSensitivityLabel-PnPOnly.ps1 `
+  -TenantName "synozur" `
+  -ClientId "df7b6a64-8d68-4e75-b15d-2cffc07cb554" `
+  -Tenant "synozur.onmicrosoft.com" `
+  -CertificatePath ".\cert\spo-inventory.pfx" `
+  -CertificatePassword $pwd `
+  -DefaultLabelId "00000000-0000-0000-0000-000000000000" `
+  -WhatIf
+```
+
+`-WhatIf` writes audit rows with `Action=WouldSet` so you can review which
+libraries would be touched.
+
+### Apply — only libraries that currently have no default label
+
+```powershell
+.\Set-M365LibraryDefaultSensitivityLabel-PnPOnly.ps1 `
+  -TenantName "synozur" `
+  -ClientId "df7b6a64-8d68-4e75-b15d-2cffc07cb554" `
+  -Tenant "synozur.onmicrosoft.com" `
+  -CertificatePath ".\cert\spo-inventory.pfx" `
+  -CertificatePassword $pwd `
+  -DefaultLabelId "00000000-0000-0000-0000-000000000000" `
+  -Resume
+```
+
+Libraries that already have a *different* label are logged with
+`Action=SkippedExistingLabel` and left alone.
+
+### Apply — replace existing different labels too
+
+```powershell
+.\Set-M365LibraryDefaultSensitivityLabel-PnPOnly.ps1 `
+  -TenantName "synozur" `
+  -ClientId "df7b6a64-8d68-4e75-b15d-2cffc07cb554" `
+  -Tenant "synozur.onmicrosoft.com" `
+  -CertificatePath ".\cert\spo-inventory.pfx" `
+  -CertificatePassword $pwd `
+  -DefaultLabelId "00000000-0000-0000-0000-000000000000" `
+  -OverwriteExisting `
+  -Resume
+```
+
+### Scope to a single set of sites
+
+```powershell
+.\Set-M365LibraryDefaultSensitivityLabel-PnPOnly.ps1 `
+  -TenantName "synozur" `
+  -ClientId "df7b6a64-8d68-4e75-b15d-2cffc07cb554" `
+  -Tenant "synozur.onmicrosoft.com" `
+  -CertificatePath ".\cert\spo-inventory.pfx" `
+  -CertificatePassword $pwd `
+  -DefaultLabelId "00000000-0000-0000-0000-000000000000" `
+  -SiteUrlLike "*/sites/Finance*"
+```
+
+### Parameters
+
+Required:
+
+- `TenantName`, `ClientId`, `Tenant`, `CertificatePath`, `CertificatePassword` — same as inventory
+- `DefaultLabelId` — sensitivity label GUID to set as each library's default
+
+Optional:
+
+- `OverwriteExisting` — replace a library's existing different default label
+- `Resume` — skip libraries already written as `Set`/`AlreadySet`
+- `SiteUrlLike` — wildcard filter on site URL (e.g. `*/sites/Finance*`)
+- `IncludeOneDriveSites` — include personal OneDrive sites (default `$false`)
+- `IncludeHiddenLibraries` — include hidden lists (default `$false`)
+- `OutputCsvPath` / `ErrorCsvPath` — override CSV locations
+- `-WhatIf` — dry run (writes `Action=WouldSet` rows)
+
+### Actions written to the audit CSV
+
+| Action | Meaning |
+|---|---|
+| `Set` | Default label was applied. |
+| `AlreadySet` | Library already had the target label. |
+| `SkippedExistingLabel` | Library has a different label; re-run with `-OverwriteExisting` to replace. |
+| `WouldSet` | `-WhatIf` dry-run row. |
+| `Error` | Set call failed; details in the errors CSV. |
+
+Only `Set` and `AlreadySet` are treated as terminal for `-Resume` —
+`WouldSet` and `SkippedExistingLabel` rows are re-evaluated on the next run.
+
+---
+
+## Run the file label apply script
+
+Use **Apply-M365FileSensitivityLabel-PnPOnly.ps1** to label existing files.
+By default each file inherits its library's current
+`DefaultSensitivityLabelForLibrary`; pass `-LabelId` to force one label
+across every library instead.
+
+> Microsoft's recommended approach for backfilling labels at scale is a
+> Purview auto-labeling policy. Use this script when that is not viable
+> (small tenants, targeted libraries, incremental rollout).
+
+Labels are applied via the Graph endpoint
+`POST /drives/{drive-id}/items/{item-id}/assignSensitivityLabel`, so the
+same app registration must have `Files.ReadWrite.All`, `Sites.Read.All`, and
+ideally `InformationProtectionPolicy.Read.All` (see the permissions table
+above).
+
+### Dry run first (recommended)
+
+```powershell
+$pwd = Read-Host "PFX password" -AsSecureString
+
+.\Apply-M365FileSensitivityLabel-PnPOnly.ps1 `
+  -TenantName "synozur" `
+  -ClientId "df7b6a64-8d68-4e75-b15d-2cffc07cb554" `
+  -Tenant "synozur.onmicrosoft.com" `
+  -CertificatePath ".\cert\spo-inventory.pfx" `
+  -CertificatePassword $pwd `
+  -WhatIf
+```
+
+`-WhatIf` writes audit rows with `Action=WouldLabel` for every file that
+would be touched.
+
+### Apply each library's default label to its files
+
+```powershell
+.\Apply-M365FileSensitivityLabel-PnPOnly.ps1 `
+  -TenantName "synozur" `
+  -ClientId "df7b6a64-8d68-4e75-b15d-2cffc07cb554" `
+  -Tenant "synozur.onmicrosoft.com" `
+  -CertificatePath ".\cert\spo-inventory.pfx" `
+  -CertificatePassword $pwd `
+  -Resume
+```
+
+Libraries with no `DefaultSensitivityLabelForLibrary` are reported
+`[skip-no-label]` and skipped — run
+`Set-M365LibraryDefaultSensitivityLabel-PnPOnly.ps1` first if you want
+those covered.
+
+### Apply one label to every file across the tenant
+
+```powershell
+.\Apply-M365FileSensitivityLabel-PnPOnly.ps1 `
+  -TenantName "synozur" `
+  -ClientId "df7b6a64-8d68-4e75-b15d-2cffc07cb554" `
+  -Tenant "synozur.onmicrosoft.com" `
+  -CertificatePath ".\cert\spo-inventory.pfx" `
+  -CertificatePassword $pwd `
+  -LabelId "00000000-0000-0000-0000-000000000000" `
+  -AssignmentMethod standard `
+  -Resume
+```
+
+### Overwrite files that already have a different label
+
+```powershell
+.\Apply-M365FileSensitivityLabel-PnPOnly.ps1 `
+  -TenantName "synozur" `
+  -ClientId "df7b6a64-8d68-4e75-b15d-2cffc07cb554" `
+  -Tenant "synozur.onmicrosoft.com" `
+  -CertificatePath ".\cert\spo-inventory.pfx" `
+  -CertificatePassword $pwd `
+  -LabelId "00000000-0000-0000-0000-000000000000" `
+  -AssignmentMethod privileged `
+  -OverwriteExisting `
+  -Resume
+```
+
+Use `-AssignmentMethod privileged` when an authorized user is explicitly
+overriding an existing label; `auto` is reserved for automated policy
+contexts; `standard` (the default) reflects normal user-initiated
+application.
+
+### Cap a rollout to a subset of sites and a per-library limit
+
+```powershell
+.\Apply-M365FileSensitivityLabel-PnPOnly.ps1 `
+  -TenantName "synozur" `
+  -ClientId "df7b6a64-8d68-4e75-b15d-2cffc07cb554" `
+  -Tenant "synozur.onmicrosoft.com" `
+  -CertificatePath ".\cert\spo-inventory.pfx" `
+  -CertificatePassword $pwd `
+  -SiteUrlLike "*/sites/Finance*" `
+  -MaxFilesPerLibrary 500
+```
+
+### Parameters
+
+Required:
+
+- `TenantName`, `ClientId`, `Tenant`, `CertificatePath`, `CertificatePassword` — same as inventory
+
+Optional:
+
+- `LabelId` — force one label across every library; if omitted, each
+  library's `DefaultSensitivityLabelForLibrary` is used and libraries with
+  no default are skipped
+- `AssignmentMethod` — `standard` (default), `privileged`, or `auto`
+- `OverwriteExisting` — relabel files that already carry a different label
+- `Resume` — skip files already written as `Labeled`/`AlreadyLabeled`
+- `SiteUrlLike` — wildcard filter on site URL
+- `MaxFilesPerLibrary` — cap per library (0 = no cap)
+- `IncludeOneDriveSites` / `IncludeHiddenLibraries`
+- `OutputCsvPath` / `ErrorCsvPath`
+- `-WhatIf` — dry run
+
+### Actions written to the audit CSV
+
+| Action | Meaning |
+|---|---|
+| `Labeled` | Label was assigned to the file. |
+| `AlreadyLabeled` | File already had the target label. |
+| `SkippedExistingLabel` | File has a different label; re-run with `-OverwriteExisting` to replace. |
+| `WouldLabel` | `-WhatIf` dry-run row. |
+| `Error` | Assign call failed; details in the errors CSV. |
+
+The script honors `Retry-After` on 429 / 503 responses and falls back to
+exponential backoff (2s, 4s, ... capped at 60s, up to 5 attempts) so large
+rollouts cooperate with Graph throttling.
+
+---
 
 ## Outputs
 
-The script writes a CSV containing these columns: [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1)
+### Inventory CSV (`Export-M365SensitivityLabelInventory-PnPOnly.ps1`)
 
-* `Timestamp`
-* `Scope` (site vs library rows)
-* `SiteUrl`
-* `SiteSensitivityLabelId`
-* `SiteSensitivityLabelName`
-* `LibraryTitle`
-* `LibraryId`
-* `LibraryServerRelativeUrl`
-* `LibraryDefaultLabelId`
-* `LibraryDefaultLabelName` [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1)
+- `Timestamp`
+- `Scope` (site vs library rows)
+- `SiteUrl`
+- `SiteSensitivityLabelId`
+- `SiteSensitivityLabelName`
+- `LibraryTitle`
+- `LibraryId`
+- `LibraryServerRelativeUrl`
+- `LibraryDefaultLabelId`
+- `LibraryDefaultLabelName`
 
-> Note: If label name mapping cannot be retrieved, label “Name” fields will be empty and the script will warn accordingly. [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1), [\[pnp.github.io\]](https://pnp.github.io/powershell/cmdlets/Get-PnPAvailableSensitivityLabel.html)
+### Library default-label apply CSV (`M365_LibraryDefaultLabel_Apply.csv` by default)
 
-***
+- `Timestamp`, `SiteUrl`, `LibraryTitle`, `LibraryId`, `LibraryServerRelativeUrl`
+- `PreviousLabelId`, `PreviousLabelName`
+- `TargetLabelId`, `TargetLabelName`
+- `Action`, `Detail`
 
-## Runtime “signs of life”
+### File apply CSV (`M365_FileLabel_Apply.csv` by default)
 
-The script prints:
+- `Timestamp`, `SiteUrl`, `LibraryTitle`
+- `DriveId`, `ItemId`, `ItemPath`
+- `PreviousLabelId`, `TargetLabelId`, `TargetLabelName`
+- `Action`, `Detail`
 
-* “Connecting…” to the admin URL [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1)
-* “Retrieving sites…” and “Sites found…” [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1)
+> If label name mapping is unavailable (`InformationProtectionPolicy.Read.All`
+> not granted), `*LabelName` columns will be empty and label IDs will still
+> be written.
 
-If you are using a version with per-site/per-library progress output (recommended), you’ll see rolling progress as each site and library is processed.
+---
 
-***
+## Runtime "signs of life"
+
+The scripts print:
+
+- "Connecting…" to the admin URL
+- "Retrieving sites…" and "Sites to process: N"
+- Per-site banner `[i/N] https://.../sites/X`
+- Per-library / per-file action lines (`[+] set`, `[=] already`, `[!] skipped`, `[?] would`, `[x] error`)
+- Rolling progress every 10 sites (and every 100 files for the file apply script)
+- A final summary block with totals and the CSV paths
+
+---
 
 ## Troubleshooting
 
-### “Label name mapping unavailable; exporting label IDs only.”
+### "Label name mapping unavailable; logging GUIDs only."
 
-This means `Get-PnPAvailableSensitivityLabel` couldn’t run successfully.   
-Grant **Graph Application** permission `InformationProtectionPolicy.Read.All` as documented for that cmdlet. [\[synozur.sh...epoint.com\]](https://synozur.sharepoint.com/sites/SynozurIT/Shared%20Documents/Forms/DispForm.aspx?ID=216&web=1) [\[pnp.github.io\]](https://pnp.github.io/powershell/cmdlets/Get-PnPAvailableSensitivityLabel.html), [\[graphpermi...merill.net\]](https://graphpermissions.merill.net/permission/InformationProtectionPolicy.Read.All)
+`Get-PnPAvailableSensitivityLabel` couldn't run. Grant
+**Graph Application** permission `InformationProtectionPolicy.Read.All` on
+the same app registration and admin-consent it.
+
+### File apply script returns 403 on `assignSensitivityLabel`
+
+Confirm `Files.ReadWrite.All` and `Sites.Read.All` are granted as
+**Application** permissions and admin-consented, and that sensitivity
+labels for SharePoint/OneDrive are enabled (see
+[Enable sensitivity labels for SharePoint/OneDrive](#enable-sensitivity-labels-for-sharepointonedrive-required)).
+
+### Library default-label set call succeeds but new files aren't labeled
+
+Setting `DefaultSensitivityLabelForLibrary` only affects newly uploaded /
+created files. Use `Apply-M365FileSensitivityLabel-PnPOnly.ps1` to label
+existing content.
 
 ### PDF label coverage looks wrong
 
-Ensure sensitivity labels for SharePoint/OneDrive are enabled, and optionally enable PDF support. [\[learn.microsoft.com\]](https://learn.microsoft.com/en-us/purview/sensitivity-labels-sharepoint-onedrive-files), [\[m365admin....sontek.net\]](https://m365admin.handsontek.net/microsoft-purview-information-protection-auto-labeling-for-files-at-rest-in-sharepoint-online-can-now-label-pdf-files/)
+Ensure sensitivity labels for SharePoint/OneDrive are enabled, and
+optionally enable PDF support
+(`Set-SPOTenant -EnableSensitivityLabelforPDF $true`).
 
 ### Archived / restricted sites
 
-Some archived/restricted sites may still appear in tenant enumeration but block list enumeration (403 Forbidden). Your inventory run should treat these as “skipped” sites, not hard failures (recommended behavior for governance inventories).
+Some archived/restricted sites still appear in tenant enumeration but block
+list enumeration (403 Forbidden). The scripts treat these as skipped sites
+(written to the errors CSV with `Operation=EnumerateLibraries`) rather than
+hard failures.
 
-***
+### Throttling on large rollouts
+
+The file apply script honors `Retry-After` and falls back to exponential
+backoff. For very large tenants, prefer `-SiteUrlLike` and
+`-MaxFilesPerLibrary` to stage the rollout, and run with `-Resume` so an
+interrupted run picks up where it left off.
+
+---
 
 ## References
 
-* [Enable sensitivity labels for files in SharePoint and OneDrive](https://learn.microsoft.com/en-us/purview/sensitivity-labels-sharepoint-onedrive-files)
-* [Auto-labeling for PDFs + Set-SPOTenant -EnableSensitivityLabelforPDF](https://m365admin.handsontek.net/microsoft-purview-information-protection-auto-labeling-for-files-at-rest-in-sharepoint-online-can-now-label-pdf-files/)
-* [PnP.PowerShell installation](https://deepwiki.com/pnp/powershell/4.1-site-and-tenant-administration)
-* [Get-PnPAvailableSensitivityLabel (required Graph permissions)](https://www.linkedin.com/pulse/securing-ms-copilot-access-over-sharepoint-site-content-sher-azam-fcy4f)
-
-***
-
-```
+- [Enable sensitivity labels for files in SharePoint and OneDrive](https://learn.microsoft.com/en-us/purview/sensitivity-labels-sharepoint-onedrive-files)
+- [Auto-labeling for PDFs + `Set-SPOTenant -EnableSensitivityLabelforPDF`](https://learn.microsoft.com/en-us/purview/sensitivity-labels-sharepoint-onedrive-files)
+- [PnP.PowerShell `Get-PnPAvailableSensitivityLabel`](https://pnp.github.io/powershell/cmdlets/Get-PnPAvailableSensitivityLabel.html)
+- [PnP.PowerShell `Set-PnPList -DefaultSensitivityLabelForLibrary`](https://pnp.github.io/powershell/cmdlets/Set-PnPList.html)
+- [Graph `driveItem: assignSensitivityLabel`](https://learn.microsoft.com/en-us/graph/api/driveitem-assignsensitivitylabel)
