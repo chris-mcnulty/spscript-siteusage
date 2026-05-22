@@ -378,8 +378,13 @@ foreach ($site in $sites) {
                             Set-PnPTenantSite -Connection $adminConn -Identity $site.Url -SensitivityLabel $DefaultLabelId | Out-Null
 
                             # Read back to verify the write actually persisted — guards against future
-                            # silent no-ops and surfaces them as VerifyFailed instead of false success.
-                            $verified = $false
+                            # silent no-ops. Distinguish three outcomes:
+                            #   Set         - persisted label matches target
+                            #   VerifyFailed- read-back succeeded but persisted label differs (or is empty)
+                            #   VerifyError - read-back itself threw (auth, throttling, transient admin API)
+                            $verified    = $false
+                            $postLabel   = ""
+                            $verifyError = $null
                             try {
                                 Start-Sleep -Milliseconds 500
                                 $postSite  = Get-PnPTenantSite -Connection $adminConn -Identity $site.Url
@@ -387,18 +392,28 @@ foreach ($site in $sites) {
                                 if ($postLabel -and ($postLabel.ToLower() -eq $DefaultLabelId.ToLower())) {
                                     $verified = $true
                                 }
-                            } catch { }
+                            } catch {
+                                $verifyError = $_.Exception.Message
+                            }
 
                             if ($verified) {
                                 $siteAction = "Set"
                                 $sitesLabelSet++
                                 Write-Host ("  [site][+] -> {0}" -f ($targetLabelName ? $targetLabelName : $DefaultLabelId)) -ForegroundColor Green
                             }
-                            else {
-                                $siteAction = "VerifyFailed"
-                                $siteDetail = "Set call returned success but label did not persist on read-back."
+                            elseif ($verifyError) {
+                                $siteAction = "VerifyError"
+                                $siteDetail = "Set call returned success but read-back failed: $verifyError"
                                 $sitesLabelError++
-                                Write-Host ("  [site][!] Set returned success but label did not persist on read-back") -ForegroundColor Red
+                                Write-Host ("  [site][?] Set returned success but read-back failed: {0}" -f $verifyError) -ForegroundColor Yellow
+                                Write-CsvRow $ErrorCsvPath @((Get-Date -Format s), "Site", $site.Url, "", "VerifySiteSensitivityLabel", $verifyError)
+                            }
+                            else {
+                                $persistedDisplay = if ($postLabel) { $postLabel } else { "<empty>" }
+                                $siteAction = "VerifyFailed"
+                                $siteDetail = "Set call returned success but persisted label '$persistedDisplay' does not match target '$DefaultLabelId'."
+                                $sitesLabelError++
+                                Write-Host ("  [site][!] Set returned success but read-back shows '{0}' (expected '{1}')" -f $persistedDisplay, $DefaultLabelId) -ForegroundColor Red
                                 Write-CsvRow $ErrorCsvPath @((Get-Date -Format s), "Site", $site.Url, "", "VerifySiteSensitivityLabel", $siteDetail)
                             }
                         }
