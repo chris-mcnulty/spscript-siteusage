@@ -189,6 +189,8 @@ if ($SiteUrlLike) {
     $sites = $sites | Where-Object { $_.Url -like $SiteUrlLike }
 }
 
+# Force an array so .Count is valid even when the filter narrows to a single site (or none).
+$sites = @($sites)
 $totalSites    = $sites.Count
 $siteIndex     = 0
 $sitesLabelSet     = 0
