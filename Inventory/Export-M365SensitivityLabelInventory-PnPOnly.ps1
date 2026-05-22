@@ -112,6 +112,23 @@ function Resolve-LabelName($id) {
     return ""
 }
 
+# Extract a site sensitivity label from a tenant-site or site object. Modern container labels
+# (the ones Set-PnPSite -SensitivityLabel writes) surface as SensitivityLabel2 on Get-PnPTenantSite;
+# SensitivityLabel is the legacy IRM string. Reading only the legacy property is why container
+# labels appeared empty in the inventory.
+function Get-SitePreviousLabel($obj) {
+    if ($null -eq $obj) { return "" }
+    foreach ($prop in @("SensitivityLabel2", "SensitivityLabel", "SensitivityLabelId")) {
+        if ($obj.PSObject.Properties.Name -contains $prop) {
+            $v = [string]$obj.$prop
+            if ($v -and $v -ne "00000000-0000-0000-0000-000000000000") {
+                return $v
+            }
+        }
+    }
+    return ""
+}
+
 # --------------------------
 # Get Sites
 # --------------------------
@@ -134,12 +151,29 @@ foreach ($site in $sites) {
     Write-Host ""
     Write-Host ("[{0}/{1}] Processing site: {2}" -f $siteIndex, $totalSites, $site.Url) -ForegroundColor Cyan
 
-    # Get label
+    # Get label from the tenant-site object first (SensitivityLabel2 holds modern container labels).
     $siteLabelId = ""
     try {
         $detail = Get-PnPTenantSite -Connection $adminConn -Identity $site.Url
-        $siteLabelId = $detail.SensitivityLabel
+        $siteLabelId = Get-SitePreviousLabel $detail
     } catch {}
+
+    # Connect to site
+    $siteConn = Connect-PnPOnline `
+        -Url $site.Url `
+        -ClientId $ClientId `
+        -Tenant $Tenant `
+        -CertificatePath $CertificatePath `
+        -CertificatePassword $CertificatePassword `
+        -ReturnConnection
+
+    # Fallback: if the tenant-site object didn't surface a label, ask the site directly.
+    if (-not $siteLabelId) {
+        try {
+            $siteObj = Get-PnPSite -Connection $siteConn -Includes "SensitivityLabelId"
+            $siteLabelId = Get-SitePreviousLabel $siteObj
+        } catch {}
+    }
 
     $siteLabelName = Resolve-LabelName $siteLabelId
 
@@ -160,15 +194,6 @@ foreach ($site in $sites) {
 
         $exportedKeys[$siteKey] = $true
     }
-
-    # Connect to site
-    $siteConn = Connect-PnPOnline `
-        -Url $site.Url `
-        -ClientId $ClientId `
-        -Tenant $Tenant `
-        -CertificatePath $CertificatePath `
-        -CertificatePassword $CertificatePassword `
-        -ReturnConnection
 
     # Get libraries
     #$lists = Get-PnPList -Connection $siteConn -Includes "Id","Title","BaseTemplate","RootFolder","DefaultSensitivityLabelForLibrary"
