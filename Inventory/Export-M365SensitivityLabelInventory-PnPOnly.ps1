@@ -20,7 +20,13 @@ param(
 
     [bool]$IncludeOneDriveSites = $false,  # ✅ EXCLUDED BY DEFAULT
 
-    [switch]$Resume
+    [switch]$Resume,
+
+    # UPN of a licensed user whose published-label set is used to resolve GUIDs -> display names
+    # in the inventory CSV. Required when running app-only because Get-PnPAvailableSensitivityLabel
+    # has no user context otherwise. Needs Graph InformationProtectionPolicy.Read.All +
+    # User.Read.All (Application) on this app.
+    [string]$LabelOwnerUpn
 )
 
 Set-StrictMode -Version Latest
@@ -68,20 +74,58 @@ $adminConn = Connect-PnPOnline `
 # --------------------------
 # Try to resolve labels
 # --------------------------
+function Get-LabelDisplayProp($l) {
+    if ($null -eq $l) { return "" }
+    foreach ($prop in @("DisplayName","Name","displayName","name")) {
+        if ($l.PSObject.Properties.Name -contains $prop) {
+            $v = [string]$l.$prop
+            if ($v) { return $v }
+        }
+    }
+    return ""
+}
+
 $labelMap = @{}
 try {
-    $labels = Get-PnPAvailableSensitivityLabel -Connection $adminConn
-    foreach ($l in $labels) {
-        $labelMap[$l.Id.ToLower()] = $l.DisplayName
+    if ($LabelOwnerUpn) {
+        $labels = Get-PnPAvailableSensitivityLabel -Connection $adminConn -User $LabelOwnerUpn
+    } else {
+        $labels = Get-PnPAvailableSensitivityLabel -Connection $adminConn
     }
+    foreach ($l in $labels) {
+        if ($l.PSObject.Properties.Name -contains "Id") {
+            $labelMap[([string]$l.Id).ToLower()] = (Get-LabelDisplayProp $l)
+        }
+    }
+    Write-Host ("Loaded {0} label name(s) for resolution." -f $labelMap.Count) -ForegroundColor DarkGray
 } catch {
-    Write-Host "Label name mapping unavailable; exporting label IDs only." -ForegroundColor Yellow
+    Write-Host ("Label name mapping unavailable; exporting label IDs only. ({0})" -f $_.Exception.Message) -ForegroundColor Yellow
+    if (-not $LabelOwnerUpn) {
+        Write-Host "Tip: pass -LabelOwnerUpn <user@domain> so app-only auth has a label-policy scope to read." -ForegroundColor Yellow
+    }
 }
 
 function Resolve-LabelName($id) {
-    if (!$id) { return "" }
-    $k = $id.ToLower()
+    if ([string]::IsNullOrWhiteSpace($id)) { return "" }
+    $k = ([string]$id).ToLower()
     if ($labelMap.ContainsKey($k)) { return $labelMap[$k] }
+    return ""
+}
+
+# Extract a site sensitivity label from a tenant-site or site object. Modern container labels
+# (the ones Set-PnPSite -SensitivityLabel writes) surface as SensitivityLabel2 on Get-PnPTenantSite;
+# SensitivityLabel is the legacy IRM string. Reading only the legacy property is why container
+# labels appeared empty in the inventory.
+function Get-SitePreviousLabel($obj) {
+    if ($null -eq $obj) { return "" }
+    foreach ($prop in @("SensitivityLabel2", "SensitivityLabel", "SensitivityLabelId")) {
+        if ($obj.PSObject.Properties.Name -contains $prop) {
+            $v = [string]$obj.$prop
+            if ($v -and $v -ne "00000000-0000-0000-0000-000000000000") {
+                return $v
+            }
+        }
+    }
     return ""
 }
 
@@ -107,12 +151,53 @@ foreach ($site in $sites) {
     Write-Host ""
     Write-Host ("[{0}/{1}] Processing site: {2}" -f $siteIndex, $totalSites, $site.Url) -ForegroundColor Cyan
 
-    # Get label
+    # Get label from the tenant-site object first (SensitivityLabel2 holds modern container labels).
     $siteLabelId = ""
     try {
         $detail = Get-PnPTenantSite -Connection $adminConn -Identity $site.Url
-        $siteLabelId = $detail.SensitivityLabel
-    } catch {}
+        $siteLabelId = Get-SitePreviousLabel $detail
+    } catch {
+        Write-Host ("  Tenant-site label lookup failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+        Add-Content $ErrorCsvPath ( '"' + (Get-Date -Format s) + '","Site","' + $site.Url + '","","","","","","","TENANT_SITE_READ:' + ($_.Exception.Message -replace '"','""') + '"' )
+    }
+
+    # Connect to site (per-site failures must not abort the whole inventory run under ErrorActionPreference=Stop).
+    $siteConn = $null
+    try {
+        $siteConn = Connect-PnPOnline `
+            -Url $site.Url `
+            -ClientId $ClientId `
+            -Tenant $Tenant `
+            -CertificatePath $CertificatePath `
+            -CertificatePassword $CertificatePassword `
+            -ReturnConnection
+    } catch {
+        Write-Host ("  ⚠️ Could not connect to site, skipping libraries: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+        Add-Content $ErrorCsvPath ( '"' + (Get-Date -Format s) + '","Site","' + $site.Url + '","","","","","","","SITE_CONNECT_FAILED:' + ($_.Exception.Message -replace '"','""') + '"' )
+
+        # Still emit the site row with whatever label we got from the tenant-site read (may be empty).
+        $siteLabelName = Resolve-LabelName $siteLabelId
+        $siteKey = "Site|$($site.Url)|"
+        if (!$exportedKeys.ContainsKey($siteKey)) {
+            Add-Content $OutputCsvPath (
+                '"' + (Get-Date -Format s) + '","Site","' + $site.Url + '","' +
+                $siteLabelId + '","' + $siteLabelName + '","","","","",""'
+            )
+            $exportedKeys[$siteKey] = $true
+        }
+        continue
+    }
+
+    # Fallback: if the tenant-site object didn't surface a label, ask the site directly.
+    if (-not $siteLabelId) {
+        try {
+            $siteObj = Get-PnPSite -Connection $siteConn -Includes "SensitivityLabelId"
+            $siteLabelId = Get-SitePreviousLabel $siteObj
+        } catch {
+            Write-Host ("  Site-scoped label lookup failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+            Add-Content $ErrorCsvPath ( '"' + (Get-Date -Format s) + '","Site","' + $site.Url + '","","","","","","","SITE_LABEL_READ:' + ($_.Exception.Message -replace '"','""') + '"' )
+        }
+    }
 
     $siteLabelName = Resolve-LabelName $siteLabelId
 
@@ -133,15 +218,6 @@ foreach ($site in $sites) {
 
         $exportedKeys[$siteKey] = $true
     }
-
-    # Connect to site
-    $siteConn = Connect-PnPOnline `
-        -Url $site.Url `
-        -ClientId $ClientId `
-        -Tenant $Tenant `
-        -CertificatePath $CertificatePath `
-        -CertificatePassword $CertificatePassword `
-        -ReturnConnection
 
     # Get libraries
     #$lists = Get-PnPList -Connection $siteConn -Includes "Id","Title","BaseTemplate","RootFolder","DefaultSensitivityLabelForLibrary"

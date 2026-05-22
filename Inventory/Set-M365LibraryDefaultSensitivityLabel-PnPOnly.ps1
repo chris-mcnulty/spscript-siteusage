@@ -371,10 +371,51 @@ foreach ($site in $sites) {
                 else {
                     if ($PSCmdlet.ShouldProcess($site.Url, "Set Site SensitivityLabel -> $DefaultLabelId")) {
                         try {
-                            Set-PnPSite -Connection $siteConn -SensitivityLabel $DefaultLabelId | Out-Null
-                            $siteAction = "Set"
-                            $sitesLabelSet++
-                            Write-Host ("  [site][+] -> {0}" -f ($targetLabelName ? $targetLabelName : $DefaultLabelId)) -ForegroundColor Green
+                            # Set-PnPSite (site-scoped) was observed to silently no-op on non-group
+                            # Communication sites under cert auth even when the label, scope, perms,
+                            # and tenant EnableMIPLabels were all in order. Set-PnPTenantSite via the
+                            # admin connection writes through the SharePoint admin API and persists.
+                            Set-PnPTenantSite -Connection $adminConn -Identity $site.Url -SensitivityLabel $DefaultLabelId | Out-Null
+
+                            # Read back to verify the write actually persisted — guards against future
+                            # silent no-ops. Distinguish three outcomes:
+                            #   Set         - persisted label matches target
+                            #   VerifyFailed- read-back succeeded but persisted label differs (or is empty)
+                            #   VerifyError - read-back itself threw (auth, throttling, transient admin API)
+                            $verified    = $false
+                            $postLabel   = ""
+                            $verifyError = $null
+                            try {
+                                Start-Sleep -Milliseconds 500
+                                $postSite  = Get-PnPTenantSite -Connection $adminConn -Identity $site.Url
+                                $postLabel = Get-SitePreviousLabel $postSite
+                                if ($postLabel -and ($postLabel.ToLower() -eq $DefaultLabelId.ToLower())) {
+                                    $verified = $true
+                                }
+                            } catch {
+                                $verifyError = $_.Exception.Message
+                            }
+
+                            if ($verified) {
+                                $siteAction = "Set"
+                                $sitesLabelSet++
+                                Write-Host ("  [site][+] -> {0}" -f ($targetLabelName ? $targetLabelName : $DefaultLabelId)) -ForegroundColor Green
+                            }
+                            elseif ($verifyError) {
+                                $siteAction = "VerifyError"
+                                $siteDetail = "Set call returned success but read-back failed: $verifyError"
+                                $sitesLabelError++
+                                Write-Host ("  [site][?] Set returned success but read-back failed: {0}" -f $verifyError) -ForegroundColor Yellow
+                                Write-CsvRow $ErrorCsvPath @((Get-Date -Format s), "Site", $site.Url, "", "VerifySiteSensitivityLabel", $verifyError)
+                            }
+                            else {
+                                $persistedDisplay = if ($postLabel) { $postLabel } else { "<empty>" }
+                                $siteAction = "VerifyFailed"
+                                $siteDetail = "Set call returned success but persisted label '$persistedDisplay' does not match target '$DefaultLabelId'."
+                                $sitesLabelError++
+                                Write-Host ("  [site][!] Set returned success but read-back shows '{0}' (expected '{1}')" -f $persistedDisplay, $DefaultLabelId) -ForegroundColor Red
+                                Write-CsvRow $ErrorCsvPath @((Get-Date -Format s), "Site", $site.Url, "", "VerifySiteSensitivityLabel", $siteDetail)
+                            }
                         }
                         catch {
                             $siteAction = "Error"
