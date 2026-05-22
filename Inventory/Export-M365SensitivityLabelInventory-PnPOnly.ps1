@@ -156,23 +156,47 @@ foreach ($site in $sites) {
     try {
         $detail = Get-PnPTenantSite -Connection $adminConn -Identity $site.Url
         $siteLabelId = Get-SitePreviousLabel $detail
-    } catch {}
+    } catch {
+        Write-Host ("  Tenant-site label lookup failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+        Add-Content $ErrorCsvPath ( '"' + (Get-Date -Format s) + '","Site","' + $site.Url + '","","","","","","","TENANT_SITE_READ:' + ($_.Exception.Message -replace '"','""') + '"' )
+    }
 
-    # Connect to site
-    $siteConn = Connect-PnPOnline `
-        -Url $site.Url `
-        -ClientId $ClientId `
-        -Tenant $Tenant `
-        -CertificatePath $CertificatePath `
-        -CertificatePassword $CertificatePassword `
-        -ReturnConnection
+    # Connect to site (per-site failures must not abort the whole inventory run under ErrorActionPreference=Stop).
+    $siteConn = $null
+    try {
+        $siteConn = Connect-PnPOnline `
+            -Url $site.Url `
+            -ClientId $ClientId `
+            -Tenant $Tenant `
+            -CertificatePath $CertificatePath `
+            -CertificatePassword $CertificatePassword `
+            -ReturnConnection
+    } catch {
+        Write-Host ("  ⚠️ Could not connect to site, skipping libraries: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+        Add-Content $ErrorCsvPath ( '"' + (Get-Date -Format s) + '","Site","' + $site.Url + '","","","","","","","SITE_CONNECT_FAILED:' + ($_.Exception.Message -replace '"','""') + '"' )
+
+        # Still emit the site row with whatever label we got from the tenant-site read (may be empty).
+        $siteLabelName = Resolve-LabelName $siteLabelId
+        $siteKey = "Site|$($site.Url)|"
+        if (!$exportedKeys.ContainsKey($siteKey)) {
+            Add-Content $OutputCsvPath (
+                '"' + (Get-Date -Format s) + '","Site","' + $site.Url + '","' +
+                $siteLabelId + '","' + $siteLabelName + '","","","","",""'
+            )
+            $exportedKeys[$siteKey] = $true
+        }
+        continue
+    }
 
     # Fallback: if the tenant-site object didn't surface a label, ask the site directly.
     if (-not $siteLabelId) {
         try {
             $siteObj = Get-PnPSite -Connection $siteConn -Includes "SensitivityLabelId"
             $siteLabelId = Get-SitePreviousLabel $siteObj
-        } catch {}
+        } catch {
+            Write-Host ("  Site-scoped label lookup failed: {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+            Add-Content $ErrorCsvPath ( '"' + (Get-Date -Format s) + '","Site","' + $site.Url + '","","","","","","","SITE_LABEL_READ:' + ($_.Exception.Message -replace '"','""') + '"' )
+        }
     }
 
     $siteLabelName = Resolve-LabelName $siteLabelId
