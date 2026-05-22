@@ -371,10 +371,36 @@ foreach ($site in $sites) {
                 else {
                     if ($PSCmdlet.ShouldProcess($site.Url, "Set Site SensitivityLabel -> $DefaultLabelId")) {
                         try {
-                            Set-PnPSite -Connection $siteConn -SensitivityLabel $DefaultLabelId | Out-Null
-                            $siteAction = "Set"
-                            $sitesLabelSet++
-                            Write-Host ("  [site][+] -> {0}" -f ($targetLabelName ? $targetLabelName : $DefaultLabelId)) -ForegroundColor Green
+                            # Set-PnPSite (site-scoped) was observed to silently no-op on non-group
+                            # Communication sites under cert auth even when the label, scope, perms,
+                            # and tenant EnableMIPLabels were all in order. Set-PnPTenantSite via the
+                            # admin connection writes through the SharePoint admin API and persists.
+                            Set-PnPTenantSite -Connection $adminConn -Identity $site.Url -SensitivityLabel $DefaultLabelId | Out-Null
+
+                            # Read back to verify the write actually persisted — guards against future
+                            # silent no-ops and surfaces them as VerifyFailed instead of false success.
+                            $verified = $false
+                            try {
+                                Start-Sleep -Milliseconds 500
+                                $postSite  = Get-PnPTenantSite -Connection $adminConn -Identity $site.Url
+                                $postLabel = Get-SitePreviousLabel $postSite
+                                if ($postLabel -and ($postLabel.ToLower() -eq $DefaultLabelId.ToLower())) {
+                                    $verified = $true
+                                }
+                            } catch { }
+
+                            if ($verified) {
+                                $siteAction = "Set"
+                                $sitesLabelSet++
+                                Write-Host ("  [site][+] -> {0}" -f ($targetLabelName ? $targetLabelName : $DefaultLabelId)) -ForegroundColor Green
+                            }
+                            else {
+                                $siteAction = "VerifyFailed"
+                                $siteDetail = "Set call returned success but label did not persist on read-back."
+                                $sitesLabelError++
+                                Write-Host ("  [site][!] Set returned success but label did not persist on read-back") -ForegroundColor Red
+                                Write-CsvRow $ErrorCsvPath @((Get-Date -Format s), "Site", $site.Url, "", "VerifySiteSensitivityLabel", $siteDetail)
+                            }
                         }
                         catch {
                             $siteAction = "Error"
