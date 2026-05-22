@@ -20,7 +20,13 @@ param(
 
     [bool]$IncludeOneDriveSites = $false,  # ✅ EXCLUDED BY DEFAULT
 
-    [switch]$Resume
+    [switch]$Resume,
+
+    # UPN of a licensed user whose published-label set is used to resolve GUIDs -> display names
+    # in the inventory CSV. Required when running app-only because Get-PnPAvailableSensitivityLabel
+    # has no user context otherwise. Needs Graph InformationProtectionPolicy.Read.All +
+    # User.Read.All (Application) on this app.
+    [string]$LabelOwnerUpn
 )
 
 Set-StrictMode -Version Latest
@@ -68,19 +74,40 @@ $adminConn = Connect-PnPOnline `
 # --------------------------
 # Try to resolve labels
 # --------------------------
+function Get-LabelDisplayProp($l) {
+    if ($null -eq $l) { return "" }
+    foreach ($prop in @("DisplayName","Name","displayName","name")) {
+        if ($l.PSObject.Properties.Name -contains $prop) {
+            $v = [string]$l.$prop
+            if ($v) { return $v }
+        }
+    }
+    return ""
+}
+
 $labelMap = @{}
 try {
-    $labels = Get-PnPAvailableSensitivityLabel -Connection $adminConn
-    foreach ($l in $labels) {
-        $labelMap[$l.Id.ToLower()] = $l.DisplayName
+    if ($LabelOwnerUpn) {
+        $labels = Get-PnPAvailableSensitivityLabel -Connection $adminConn -User $LabelOwnerUpn
+    } else {
+        $labels = Get-PnPAvailableSensitivityLabel -Connection $adminConn
     }
+    foreach ($l in $labels) {
+        if ($l.PSObject.Properties.Name -contains "Id") {
+            $labelMap[([string]$l.Id).ToLower()] = (Get-LabelDisplayProp $l)
+        }
+    }
+    Write-Host ("Loaded {0} label name(s) for resolution." -f $labelMap.Count) -ForegroundColor DarkGray
 } catch {
-    Write-Host "Label name mapping unavailable; exporting label IDs only." -ForegroundColor Yellow
+    Write-Host ("Label name mapping unavailable; exporting label IDs only. ({0})" -f $_.Exception.Message) -ForegroundColor Yellow
+    if (-not $LabelOwnerUpn) {
+        Write-Host "Tip: pass -LabelOwnerUpn <user@domain> so app-only auth has a label-policy scope to read." -ForegroundColor Yellow
+    }
 }
 
 function Resolve-LabelName($id) {
-    if (!$id) { return "" }
-    $k = $id.ToLower()
+    if ([string]::IsNullOrWhiteSpace($id)) { return "" }
+    $k = ([string]$id).ToLower()
     if ($labelMap.ContainsKey($k)) { return $labelMap[$k] }
     return ""
 }
