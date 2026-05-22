@@ -56,7 +56,13 @@ param(
     # If supplied, this label is applied to every file in every library.
     # If omitted, each file inherits the library's current
     # DefaultSensitivityLabelForLibrary (libraries with no default are skipped).
+    # Mutually exclusive with -LabelName.
     [string]$LabelId,
+
+    # Alternative to -LabelId: specify the label by its display name. Requires -LabelOwnerUpn
+    # so the script can resolve the name via Get-PnPAvailableSensitivityLabel. Mutually
+    # exclusive with -LabelId.
+    [string]$LabelName,
 
     # standard | privileged | auto
     [ValidateSet("standard","privileged","auto")]
@@ -91,8 +97,14 @@ $ErrorActionPreference = "Stop"
 Import-Module PnP.PowerShell -ErrorAction Stop
 
 # --------------------------
-# Validate forced label (if any)
+# Validate forced label (if any) — -LabelName resolves to a GUID after the catalog loads
 # --------------------------
+if ($LabelId -and $LabelName) {
+    throw "Specify -LabelId or -LabelName, not both."
+}
+if ($LabelName -and -not $LabelOwnerUpn) {
+    throw "-LabelName requires -LabelOwnerUpn so the label catalog can be loaded and the name resolved."
+}
 if ($LabelId) {
     $g = [Guid]::Empty
     if (-not [Guid]::TryParse($LabelId, [ref]$g)) {
@@ -182,6 +194,33 @@ try {
         Write-Host "Tip: pass -LabelOwnerUpn <user@domain> so app-only auth has a label-policy scope to read." -ForegroundColor Yellow
     }
 }
+
+# --------------------------
+# Resolve -LabelName -> GUID, or pre-flight-validate -LabelId against the catalog
+# --------------------------
+function Format-LabelCatalog($map) {
+    if ($map.Count -eq 0) { return "  (catalog empty)" }
+    ($map.GetEnumerator() | Sort-Object Value | ForEach-Object { "  - $($_.Value)  ($($_.Key))" }) -join "`n"
+}
+
+if ($LabelName) {
+    if ($labelMap.Count -eq 0) {
+        throw "Could not load the label catalog, so -LabelName '$LabelName' cannot be resolved. Check Graph permissions (InformationProtectionPolicy.Read.All, User.Read.All) and that -LabelOwnerUpn '$LabelOwnerUpn' is a licensed user in this tenant."
+    }
+    $match = $labelMap.GetEnumerator() | Where-Object { $_.Value -ieq $LabelName } | Select-Object -First 1
+    if (-not $match) {
+        throw "Label name '$LabelName' not found in tenant catalog.`nAvailable labels:`n$(Format-LabelCatalog $labelMap)"
+    }
+    $LabelId = [string]$match.Key
+    Write-Host ("Resolved -LabelName '{0}' -> {1}" -f $LabelName, $LabelId) -ForegroundColor Green
+}
+elseif ($LabelId -and $labelMap.Count -gt 0) {
+    # We have both a forced ID and a catalog -> fail fast on bogus GUIDs before any writes.
+    if (-not $labelMap.ContainsKey($LabelId.ToLower())) {
+        throw "LabelId '$LabelId' is not in the tenant label catalog. Aborting before any writes.`nAvailable labels:`n$(Format-LabelCatalog $labelMap)"
+    }
+}
+
 function Resolve-LabelName([string]$id) {
     if ([string]::IsNullOrWhiteSpace($id)) { return "" }
     $k = $id.ToLower()

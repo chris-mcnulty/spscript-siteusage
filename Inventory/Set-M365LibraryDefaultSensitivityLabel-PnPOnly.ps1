@@ -1,4 +1,4 @@
-[CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium')]
+[CmdletBinding(SupportsShouldProcess=$true, ConfirmImpact='Medium', DefaultParameterSetName='ById')]
 param(
     [Parameter(Mandatory=$true)]
     [string]$TenantName,
@@ -15,9 +15,14 @@ param(
     [Parameter(Mandatory=$true)]
     [SecureString]$CertificatePassword,
 
-    # The sensitivity label GUID to apply as the library default.
-    [Parameter(Mandatory=$true)]
+    # The sensitivity label GUID to apply as the library default. Mutually exclusive with -DefaultLabelName.
+    [Parameter(Mandatory=$true, ParameterSetName='ById')]
     [string]$DefaultLabelId,
+
+    # The sensitivity label display name to apply as the library default. Requires -LabelOwnerUpn so the
+    # script can resolve name -> GUID via Get-PnPAvailableSensitivityLabel. Mutually exclusive with -DefaultLabelId.
+    [Parameter(Mandatory=$true, ParameterSetName='ByName')]
+    [string]$DefaultLabelName,
 
     # CSV audit log of every library evaluated and what was done.
     [string]$OutputCsvPath = ".\M365_LibraryDefaultLabel_Apply.csv",
@@ -58,13 +63,18 @@ if ($SkipSiteLevel -and $SkipLibraries) {
 Import-Module PnP.PowerShell -ErrorAction Stop
 
 # --------------------------
-# Validate label GUID
+# Validate label GUID (only when supplied directly — name mode resolves to GUID later)
 # --------------------------
-$labelGuid = [Guid]::Empty
-if (-not [Guid]::TryParse($DefaultLabelId, [ref]$labelGuid)) {
-    throw "DefaultLabelId '$DefaultLabelId' is not a valid GUID."
+if ($PSCmdlet.ParameterSetName -eq 'ById') {
+    $labelGuid = [Guid]::Empty
+    if (-not [Guid]::TryParse($DefaultLabelId, [ref]$labelGuid)) {
+        throw "DefaultLabelId '$DefaultLabelId' is not a valid GUID."
+    }
+    $DefaultLabelId = $labelGuid.ToString()
 }
-$DefaultLabelId = $labelGuid.ToString()
+elseif ($PSCmdlet.ParameterSetName -eq 'ByName' -and -not $LabelOwnerUpn) {
+    throw "-DefaultLabelName requires -LabelOwnerUpn so the label catalog can be loaded and the name resolved."
+}
 
 # --------------------------
 # CSV Setup
@@ -162,6 +172,32 @@ try {
     Write-Host ("Label name mapping unavailable; will log GUIDs only. ({0})" -f $_.Exception.Message) -ForegroundColor Yellow
     if (-not $LabelOwnerUpn) {
         Write-Host "Tip: pass -LabelOwnerUpn <user@domain> so app-only auth has a label-policy scope to read." -ForegroundColor Yellow
+    }
+}
+
+# --------------------------
+# Resolve -DefaultLabelName -> GUID, or pre-flight-validate -DefaultLabelId against the catalog
+# --------------------------
+function Format-LabelCatalog($map) {
+    if ($map.Count -eq 0) { return "  (catalog empty)" }
+    ($map.GetEnumerator() | Sort-Object Value | ForEach-Object { "  - $($_.Value)  ($($_.Key))" }) -join "`n"
+}
+
+if ($PSCmdlet.ParameterSetName -eq 'ByName') {
+    if ($labelMap.Count -eq 0) {
+        throw "Could not load the label catalog, so -DefaultLabelName '$DefaultLabelName' cannot be resolved. Check Graph permissions (InformationProtectionPolicy.Read.All, User.Read.All) and that -LabelOwnerUpn '$LabelOwnerUpn' is a licensed user in this tenant."
+    }
+    $match = $labelMap.GetEnumerator() | Where-Object { $_.Value -ieq $DefaultLabelName } | Select-Object -First 1
+    if (-not $match) {
+        throw "Label name '$DefaultLabelName' not found in tenant catalog.`nAvailable labels:`n$(Format-LabelCatalog $labelMap)"
+    }
+    $DefaultLabelId = [string]$match.Key
+    Write-Host ("Resolved -DefaultLabelName '{0}' -> {1}" -f $DefaultLabelName, $DefaultLabelId) -ForegroundColor Green
+}
+elseif ($labelMap.Count -gt 0) {
+    # ById mode AND we have a catalog -> fail fast on bogus GUIDs before touching any sites.
+    if (-not $labelMap.ContainsKey($DefaultLabelId.ToLower())) {
+        throw "DefaultLabelId '$DefaultLabelId' is not in the tenant label catalog. Aborting before any writes.`nAvailable labels:`n$(Format-LabelCatalog $labelMap)"
     }
 }
 
