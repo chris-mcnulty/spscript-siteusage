@@ -1,6 +1,6 @@
 # SharePoint Sensitivity Label Inventory & Apply (PnP.PowerShell)
 
-This folder contains four main scripts that together let you stand up an app
+This folder contains five main scripts that together let you stand up an app
 registration, inventory sensitivity labels across the tenant, and apply
 default labels at the library level and explicit labels at the file level.
 
@@ -14,7 +14,12 @@ default labels at the library level and explicit labels at the file level.
    tenant (with `-WhatIf`, `-Resume`, and `-OverwriteExisting` support).
 4. **Apply-M365FileSensitivityLabel-PnPOnly.ps1** — write. Applies a
    sensitivity label to existing files in every document library, either
-   the library's own default label or a single forced `-LabelId`.
+   the library's own default label or a single forced `-LabelId`. Supports
+   `-OverwriteExisting` to replace labels.
+5. **Apply-M365FileDefaultSensitivityLabel-PnPOnly.ps1** — write. Applies a
+   single default sensitivity label to every **unlabeled** file across the
+   tenant. Never overwrites existing labels — files with any current label
+   are skipped.
 
 A legacy `Export-M365SensitivityLabelInventory.ps1` (SPO + PnP hybrid) and an
 `exampleAIP.ps1` snippet (tenant `EnableAIPIntegration` toggle) are also kept
@@ -33,6 +38,7 @@ here. Prefer the `-PnPOnly` variants for new work.
 - [Run the inventory script (PnP version)](#run-the-inventory-script-pnp-version)
 - [Run the library default-label apply script](#run-the-library-default-label-apply-script)
 - [Run the file label apply script](#run-the-file-label-apply-script)
+- [Run the file default-label apply script (unlabeled only)](#run-the-file-default-label-apply-script-unlabeled-only)
 - [Outputs](#outputs)
 - [Runtime "signs of life"](#runtime-signs-of-life)
 - [Troubleshooting](#troubleshooting)
@@ -450,6 +456,96 @@ rollouts cooperate with Graph throttling.
 
 ---
 
+## Run the file default-label apply script (unlabeled only)
+
+Use **Apply-M365FileDefaultSensitivityLabel-PnPOnly.ps1** when you want to
+guarantee a baseline label on **only the unlabeled files** in your tenant
+without disturbing files that already have a label (matching or different).
+
+This is the file-level analogue of
+`Set-M365LibraryDefaultSensitivityLabel-PnPOnly.ps1` — same pattern, just
+applied to driveItems instead of lists. Files that already carry any label
+are recorded as `AlreadyLabeled` or `SkippedExistingLabel` and left alone;
+unlabeled files get the supplied default. There is no `-OverwriteExisting`
+switch by design — use `Apply-M365FileSensitivityLabel-PnPOnly.ps1` for
+that case.
+
+### Dry run first (recommended)
+
+```powershell
+$pwd = Read-Host "PFX password" -AsSecureString
+
+.\Apply-M365FileDefaultSensitivityLabel-PnPOnly.ps1 `
+  -TenantName "synozur" `
+  -ClientId "df7b6a64-8d68-4e75-b15d-2cffc07cb554" `
+  -Tenant "synozur.onmicrosoft.com" `
+  -CertificatePath ".\cert\spo-inventory.pfx" `
+  -CertificatePassword $pwd `
+  -DefaultLabelId "00000000-0000-0000-0000-000000000000" `
+  -WhatIf
+```
+
+### Apply the default to every unlabeled file
+
+```powershell
+.\Apply-M365FileDefaultSensitivityLabel-PnPOnly.ps1 `
+  -TenantName "synozur" `
+  -ClientId "df7b6a64-8d68-4e75-b15d-2cffc07cb554" `
+  -Tenant "synozur.onmicrosoft.com" `
+  -CertificatePath ".\cert\spo-inventory.pfx" `
+  -CertificatePassword $pwd `
+  -DefaultLabelId "00000000-0000-0000-0000-000000000000" `
+  -Resume
+```
+
+### Apply by label display name
+
+```powershell
+.\Apply-M365FileDefaultSensitivityLabel-PnPOnly.ps1 `
+  -TenantName "synozur" `
+  -ClientId "df7b6a64-8d68-4e75-b15d-2cffc07cb554" `
+  -Tenant "synozur.onmicrosoft.com" `
+  -CertificatePath ".\cert\spo-inventory.pfx" `
+  -CertificatePassword $pwd `
+  -DefaultLabelName "General" `
+  -LabelOwnerUpn "labels-owner@synozur.com" `
+  -Resume
+```
+
+### Parameters
+
+Required:
+
+- `TenantName`, `ClientId`, `Tenant`, `CertificatePath`, `CertificatePassword` — same as inventory
+- `DefaultLabelId` **or** `DefaultLabelName` — the label to apply to unlabeled files
+  (use `-LabelOwnerUpn` with `-DefaultLabelName` so the name resolves)
+
+Optional:
+
+- `AssignmentMethod` — `standard` (default), `privileged`, or `auto`
+- `Resume` — skip files already written as `Labeled`, `AlreadyLabeled`, or `SkippedExistingLabel`
+- `SiteUrlLike` — wildcard filter on site URL
+- `MaxFilesPerLibrary` — cap per library (0 = no cap)
+- `IncludeOneDriveSites` / `IncludeHiddenLibraries`
+- `OutputCsvPath` / `ErrorCsvPath`
+- `-WhatIf` — dry run
+
+### Actions written to the audit CSV
+
+| Action | Meaning |
+|---|---|
+| `Labeled` | Default label was applied to a previously unlabeled file. |
+| `AlreadyLabeled` | File already had the same target label. |
+| `SkippedExistingLabel` | File has a different label; left untouched by design. |
+| `WouldLabel` | `-WhatIf` dry-run row. |
+| `Error` | Assign call failed; details in the errors CSV. |
+
+All three of `Labeled`, `AlreadyLabeled`, and `SkippedExistingLabel` are
+terminal for `-Resume` (this script never overwrites, so a labeled file's
+decision is stable across runs). Only `WouldLabel` is re-evaluated.
+
+---
+
 ## Outputs
 
 ### Inventory CSV (`Export-M365SensitivityLabelInventory-PnPOnly.ps1`)
@@ -477,6 +573,14 @@ rollouts cooperate with Graph throttling.
 - `Timestamp`, `SiteUrl`, `LibraryTitle`
 - `DriveId`, `ItemId`, `ItemPath`
 - `PreviousLabelId`, `TargetLabelId`, `TargetLabelName`
+- `Action`, `Detail`
+
+### File default-label apply CSV (`M365_FileDefaultLabel_Apply.csv` by default)
+
+- `Timestamp`, `SiteUrl`, `LibraryTitle`
+- `DriveId`, `ItemId`, `ItemPath`
+- `PreviousLabelId`, `PreviousLabelName`
+- `TargetLabelId`, `TargetLabelName`
 - `Action`, `Detail`
 
 > If label name mapping is unavailable (`InformationProtectionPolicy.Read.All`
