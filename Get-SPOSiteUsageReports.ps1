@@ -67,10 +67,26 @@ param(
 # Set error action preference
 $ErrorActionPreference = "Stop"
 
-# Ensure PackageManagement can install modules to CurrentUser without elevation.
+function Test-IsElevatedSession {
+    try {
+        $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+        return $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+    }
+    catch {
+        return $false
+    }
+}
+
+# Ensure PackageManagement can install modules without a dead-end elevation failure.
 # Install-Module often fails with "Administrator rights are required" when the NuGet
-# provider is missing, because the provider bootstrap defaults to AllUsers scope.
+# provider is missing (bootstrap defaults to AllUsers) or when CurrentUser installs
+# are attempted from an elevated session on some PackageManagement builds.
 function Initialize-ModuleInstallEnvironment {
+    param(
+        [switch]$IsElevated
+    )
+
     try {
         # Gallery downloads require TLS 1.2 on older Windows / .NET defaults.
         $tls = [Net.ServicePointManager]::SecurityProtocol
@@ -80,16 +96,30 @@ function Initialize-ModuleInstallEnvironment {
         # Best-effort; Install-Module may still succeed on modern hosts.
     }
 
+    $nugetScopes = if ($IsElevated) { @('CurrentUser', 'AllUsers') } else { @('CurrentUser') }
     try {
         $nuget = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
         if (-not $nuget -or [version]$nuget.Version -lt [version]'2.8.5.201') {
-            Write-Host "Bootstrapping NuGet package provider (CurrentUser)..." -ForegroundColor Cyan
-            $null = Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force -ErrorAction Stop
+            $nugetInstalled = $false
+            foreach ($scope in $nugetScopes) {
+                try {
+                    Write-Host "Bootstrapping NuGet package provider ($scope)..." -ForegroundColor Cyan
+                    $null = Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope $scope -Force -ErrorAction Stop
+                    $nugetInstalled = $true
+                    break
+                }
+                catch {
+                    Write-Warning "NuGet bootstrap with -Scope $scope failed: $_"
+                }
+            }
+            if (-not $nugetInstalled) {
+                throw "Unable to install NuGet package provider for scopes: $($nugetScopes -join ', ')"
+            }
         }
     }
     catch {
-        Write-Warning "Could not ensure NuGet package provider for CurrentUser: $_"
-        Write-Warning "If module install fails with 'Administrator rights are required', run once as a normal user: Install-PackageProvider -Name NuGet -Scope CurrentUser -Force"
+        Write-Warning "Could not ensure NuGet package provider: $_"
+        Write-Warning "If module install fails with 'Administrator rights are required', run once: Install-PackageProvider -Name NuGet -Scope CurrentUser -Force"
     }
 
     try {
@@ -108,6 +138,76 @@ function Initialize-ModuleInstallEnvironment {
     }
 }
 
+function Install-ModuleWithScopeFallback {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ModuleName,
+
+        [Parameter(Mandatory)]
+        [string[]]$Scopes
+    )
+
+    $errors = @()
+    foreach ($scope in $Scopes) {
+        try {
+            Write-Host "Installing '$ModuleName' (-Scope $scope)..." -ForegroundColor Cyan
+            Install-Module -Name $ModuleName -Scope $scope -Repository PSGallery `
+                -Force -AllowClobber -SkipPublisherCheck -ErrorAction Stop
+
+            if (Get-Module -ListAvailable -Name $ModuleName) {
+                Write-Host "Module '$ModuleName' installed successfully (-Scope $scope)." -ForegroundColor Green
+                return $true
+            }
+
+            $errors += "Install with -Scope $scope reported success but module is still not ListAvailable."
+        }
+        catch {
+            $errors += "Scope ${scope}: $_"
+            Write-Warning "Install of '$ModuleName' with -Scope $scope failed: $_"
+        }
+    }
+
+    # Last resort: Save-Module into the CurrentUser modules path (works even when
+    # Install-Module's scope logic is confused in elevated sessions).
+    try {
+        $userModules = if ($PSVersionTable.PSEdition -eq 'Core') {
+            Join-Path -Path ([Environment]::GetFolderPath('MyDocuments')) -ChildPath 'PowerShell\Modules'
+        }
+        else {
+            Join-Path -Path ([Environment]::GetFolderPath('MyDocuments')) -ChildPath 'WindowsPowerShell\Modules'
+        }
+        if (-not (Test-Path -LiteralPath $userModules)) {
+            $null = New-Item -Path $userModules -ItemType Directory -Force
+        }
+        Write-Host "Falling back to Save-Module into '$userModules'..." -ForegroundColor Cyan
+        Save-Module -Name $ModuleName -Path $userModules -Repository PSGallery -Force -ErrorAction Stop
+        if (Get-Module -ListAvailable -Name $ModuleName) {
+            Write-Host "Module '$ModuleName' saved successfully to CurrentUser modules path." -ForegroundColor Green
+            return $true
+        }
+        $errors += "Save-Module completed but module is still not ListAvailable under '$userModules'."
+    }
+    catch {
+        $errors += "Save-Module: $_"
+        Write-Warning "Save-Module fallback for '$ModuleName' failed: $_"
+    }
+
+    Write-Host @"
+Failed to install module '$ModuleName'.
+$($errors -join [Environment]::NewLine)
+
+Manual recovery (pick one):
+  # Elevated session (Run as Administrator):
+  Install-Module -Name $ModuleName -Scope AllUsers -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck
+
+  # Normal (non-elevated) session:
+  Install-PackageProvider -Name NuGet -Scope CurrentUser -Force
+  Install-Module -Name $ModuleName -Scope CurrentUser -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck
+Then re-run this script.
+"@ -ForegroundColor Red
+    return $false
+}
+
 # Function to check, install, and import required modules into the current session.
 # Microsoft.Online.SharePoint.PowerShell is Windows PowerShell 5.1-native; on PowerShell 7+
 # it must be imported with -UseWindowsPowerShell or Connect/Disconnect-SPOService will not
@@ -117,33 +217,27 @@ function Install-RequiredModules {
         [string[]]$ModuleNames
     )
 
+    $isElevated = Test-IsElevatedSession
+    if ($isElevated) {
+        Write-Host "Detected elevated PowerShell session; will try CurrentUser then AllUsers module installs." -ForegroundColor Cyan
+    }
+
     $needInstall = @($ModuleNames | Where-Object { -not (Get-Module -ListAvailable -Name $_) })
     if ($needInstall.Count -gt 0) {
-        Initialize-ModuleInstallEnvironment
+        Initialize-ModuleInstallEnvironment -IsElevated:$isElevated
     }
+
+    # CurrentUser first (works without elevation). If this is an elevated session,
+    # PackageManagement sometimes still rejects CurrentUser — fall back to AllUsers.
+    $installScopes = if ($isElevated) { @('CurrentUser', 'AllUsers') } else { @('CurrentUser') }
 
     # Pass 1: install any missing modules before importing SPO (which may start a
     # WinPSCompatSession on PS 7+ and can interfere with subsequent Install-Module).
     foreach ($moduleName in $needInstall) {
         Write-Host "Module '$moduleName' not found. Attempting to install..." -ForegroundColor Yellow
-        try {
-            Install-Module -Name $moduleName -Scope CurrentUser -Repository PSGallery `
-                -Force -AllowClobber -SkipPublisherCheck -ErrorAction Stop
-            Write-Host "Module '$moduleName' installed successfully." -ForegroundColor Green
-        }
-        catch {
-            Write-Error "Failed to install module '$moduleName': $_"
-            Write-Error @"
-Install without elevation (run as your normal user, not Administrator):
-  Install-PackageProvider -Name NuGet -Scope CurrentUser -Force
-  Install-Module -Name $moduleName -Scope CurrentUser -Repository PSGallery -Force -AllowClobber
-Then re-run this script.
-"@
-            return $false
-        }
-
-        if (-not (Get-Module -ListAvailable -Name $moduleName)) {
-            Write-Error "Module '$moduleName' still not found after Install-Module. Install may have failed silently (often a NuGet provider / permissions issue)."
+        # Do not use Write-Error here: with $ErrorActionPreference Stop it becomes a
+        # terminating error and skips remaining modules / outer recovery messaging.
+        if (-not (Install-ModuleWithScopeFallback -ModuleName $moduleName -Scopes $installScopes)) {
             return $false
         }
     }
@@ -166,9 +260,11 @@ Then re-run this script.
                 Import-Module @importParams
             }
             catch {
-                Write-Error "Failed to import module '$moduleName': $_"
+                # Use Write-Host so Stop preference does not convert this into a second
+                # wrapped "An error occurred:" and hide the import guidance below.
+                Write-Host "Failed to import module '$moduleName': $_" -ForegroundColor Red
                 if ($moduleName -eq 'Microsoft.Online.SharePoint.PowerShell' -and $PSVersionTable.PSEdition -eq 'Core') {
-                    Write-Error "On PowerShell 7+, Microsoft.Online.SharePoint.PowerShell requires Windows + Import-Module -UseWindowsPowerShell. Prefer Windows PowerShell 5.1, or run Graph-only mode (-UseGraphAPI)."
+                    Write-Host "On PowerShell 7+, Microsoft.Online.SharePoint.PowerShell requires Windows + Import-Module -UseWindowsPowerShell. Prefer Windows PowerShell 5.1, or run Graph-only mode (-UseGraphAPI)." -ForegroundColor Red
                 }
                 return $false
             }

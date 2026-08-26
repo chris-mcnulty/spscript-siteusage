@@ -17,7 +17,7 @@ This PowerShell script enumerates usage reports from all SharePoint sites in a t
 ### PowerShell host
 - **Preferred**: Windows PowerShell 5.1 (`powershell.exe`) or the SharePoint Online Management Shell
 - **Also supported**: PowerShell 7+ (`pwsh`) on Windows (SPO module loads via Windows PowerShell compatibility)
-- Do **not** elevate just to install modules; the script uses `-Scope CurrentUser`
+- Elevation is not required to install modules (`-Scope CurrentUser`). Elevated sessions are supported via an automatic `-Scope AllUsers` fallback.
 
 ### For SharePoint Online Management Shell Method (Default)
 - PowerShell 5.1 or later
@@ -199,9 +199,19 @@ $outputPath = "\\fileserver\Reports\SharePoint\Usage_$monthYear.csv"
 ## Troubleshooting
 
 ### Issue: Module Installation Fails ("Administrator rights are required")
-The script installs modules with `-Scope CurrentUser` and bootstraps the NuGet provider the same way. You do **not** need an elevated (Run as Administrator) session.
+The script tries `-Scope CurrentUser` first. If you are already in an elevated ("Run as Administrator") window — which is what often triggers this error even with CurrentUser — it automatically retries with `-Scope AllUsers`, then falls back to `Save-Module` into your user modules folder.
 
-If install still fails, run these once as your **normal** user (not Administrator), then re-run the script:
+You do **not** need to elevate just to install modules. A normal user session with CurrentUser scope is preferred.
+
+If auto-install still fails, run one of these once, then re-run the script:
+
+**Elevated session (matches an Administrator title bar):**
+```powershell
+Install-Module -Name Microsoft.Graph.Reports, Microsoft.Graph.Authentication, Microsoft.Online.SharePoint.PowerShell `
+    -Scope AllUsers -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck
+```
+
+**Normal (non-elevated) session:**
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force
@@ -212,7 +222,7 @@ Install-Module -Name Microsoft.Graph.Reports, Microsoft.Graph.Authentication, Mi
 ### Which PowerShell should I use?
 - **Preferred for `-UseCombined` / default SPO mode**: Windows PowerShell 5.1 (`powershell.exe`), or the SharePoint Online Management Shell (same engine with SPO preinstalled).
 - **PowerShell 7+ (`pwsh`)**: Works. Graph mode is fine natively; SPO mode imports `Microsoft.Online.SharePoint.PowerShell` via `-UseWindowsPowerShell` (Windows only).
-- **Avoid**: An elevated "Run as Administrator" session just to install modules — use CurrentUser scope instead.
+- **Elevated sessions**: Supported for installs now (AllUsers fallback), but a normal user session is still preferred for day-to-day runs.
 
 ### Issue: Authentication Fails
 **Solution**: Ensure you have the required permissions:
