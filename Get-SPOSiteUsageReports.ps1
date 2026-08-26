@@ -67,26 +67,75 @@ param(
 # Set error action preference
 $ErrorActionPreference = "Stop"
 
-# Function to check and install required modules
+# Function to check, install, and import required modules into the current session.
+# Microsoft.Online.SharePoint.PowerShell is Windows PowerShell 5.1-native; on PowerShell 7+
+# it must be imported with -UseWindowsPowerShell or Connect/Disconnect-SPOService will not
+# resolve (and a bare Disconnect in a finally block can mask the real connect error).
 function Install-RequiredModules {
     param(
         [string[]]$ModuleNames
     )
-    
+
     foreach ($moduleName in $ModuleNames) {
         if (-not (Get-Module -ListAvailable -Name $moduleName)) {
             Write-Host "Module '$moduleName' not found. Attempting to install..." -ForegroundColor Yellow
             try {
-                Install-Module -Name $moduleName -Scope CurrentUser -Force -AllowClobber
+                # Prefer CurrentUser so elevation is not required. Suppress the common
+                # PackageManagement/NuGet bootstrap warning that still allows a CurrentUser install.
+                Install-Module -Name $moduleName -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
                 Write-Host "Module '$moduleName' installed successfully." -ForegroundColor Green
             }
             catch {
                 Write-Error "Failed to install module '$moduleName': $_"
+                Write-Error "If you see 'Administrator rights are required', close this session and re-run as a normal user with: Install-Module $moduleName -Scope CurrentUser -Force"
+                return $false
+            }
+
+            if (-not (Get-Module -ListAvailable -Name $moduleName)) {
+                Write-Error "Module '$moduleName' still not found after Install-Module. Install may have failed silently (often a NuGet provider / permissions issue)."
+                return $false
+            }
+        }
+
+        # Ensure the module is loaded in *this* session (ListAvailable alone is not enough).
+        if (-not (Get-Module -Name $moduleName)) {
+            try {
+                $importParams = @{
+                    Name        = $moduleName
+                    Force       = $true
+                    ErrorAction = 'Stop'
+                }
+                # SPO Management Shell needs Windows PowerShell compatibility on PS 7+.
+                if ($moduleName -eq 'Microsoft.Online.SharePoint.PowerShell' -and
+                    $PSVersionTable.PSEdition -eq 'Core') {
+                    $importParams['UseWindowsPowerShell'] = $true
+                    Write-Host "Importing '$moduleName' with -UseWindowsPowerShell (required on PowerShell 7+)..." -ForegroundColor Cyan
+                }
+                Import-Module @importParams
+            }
+            catch {
+                Write-Error "Failed to import module '$moduleName': $_"
+                if ($moduleName -eq 'Microsoft.Online.SharePoint.PowerShell' -and $PSVersionTable.PSEdition -eq 'Core') {
+                    Write-Error "On PowerShell 7+, Microsoft.Online.SharePoint.PowerShell requires Windows + Import-Module -UseWindowsPowerShell. Prefer Windows PowerShell 5.1, or run Graph-only mode (-UseGraphAPI)."
+                }
                 return $false
             }
         }
     }
     return $true
+}
+
+# Safely disconnect SPO so a missing Disconnect-SPOService cmdlet never masks the real error.
+function Disconnect-SPOServiceSafe {
+    $cmd = Get-Command Disconnect-SPOService -ErrorAction SilentlyContinue
+    if ($cmd) {
+        try {
+            Disconnect-SPOService -ErrorAction SilentlyContinue
+        }
+        catch {
+            # Best-effort cleanup only
+        }
+    }
 }
 
 # Function to get usage reports using Microsoft Graph API
@@ -327,7 +376,9 @@ function Get-UsageReportsViaSPO {
         throw
     }
     finally {
-        $null = Disconnect-SPOService -ErrorAction SilentlyContinue
+        # Must not call Disconnect-SPOService when the module failed to load —
+        # CommandNotFoundException is terminating and would mask the real error.
+        Disconnect-SPOServiceSafe
     }
 }
 
