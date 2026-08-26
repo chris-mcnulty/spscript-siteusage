@@ -14,6 +14,11 @@ This PowerShell script enumerates usage reports from all SharePoint sites in a t
 
 ## Prerequisites
 
+### PowerShell host
+- **Preferred**: Windows PowerShell 5.1 (`powershell.exe`) or the SharePoint Online Management Shell
+- **Also supported**: PowerShell 7+ (`pwsh`) on Windows (SPO module loads via Windows PowerShell compatibility)
+- Do **not** elevate just to install modules; the script uses `-Scope CurrentUser`
+
 ### For SharePoint Online Management Shell Method (Default)
 - PowerShell 5.1 or later
 - Microsoft.Online.SharePoint.PowerShell module (auto-installed if missing)
@@ -193,11 +198,21 @@ $outputPath = "\\fileserver\Reports\SharePoint\Usage_$monthYear.csv"
 
 ## Troubleshooting
 
-### Issue: Module Installation Fails
-**Solution**: Run PowerShell as Administrator or use `-Scope CurrentUser` when installing modules manually:
+### Issue: Module Installation Fails ("Administrator rights are required")
+The script installs modules with `-Scope CurrentUser` and bootstraps the NuGet provider the same way. You do **not** need an elevated (Run as Administrator) session.
+
+If install still fails, run these once as your **normal** user (not Administrator), then re-run the script:
 ```powershell
-Install-Module -Name Microsoft.Online.SharePoint.PowerShell -Scope CurrentUser -Force
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force
+Install-Module -Name Microsoft.Graph.Reports, Microsoft.Graph.Authentication, Microsoft.Online.SharePoint.PowerShell `
+    -Scope CurrentUser -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck
 ```
+
+### Which PowerShell should I use?
+- **Preferred for `-UseCombined` / default SPO mode**: Windows PowerShell 5.1 (`powershell.exe`), or the SharePoint Online Management Shell (same engine with SPO preinstalled).
+- **PowerShell 7+ (`pwsh`)**: Works. Graph mode is fine natively; SPO mode imports `Microsoft.Online.SharePoint.PowerShell` via `-UseWindowsPowerShell` (Windows only).
+- **Avoid**: An elevated "Run as Administrator" session just to install modules — use CurrentUser scope instead.
 
 ### Issue: Authentication Fails
 **Solution**: Ensure you have the required permissions:

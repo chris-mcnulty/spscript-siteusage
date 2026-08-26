@@ -67,6 +67,47 @@ param(
 # Set error action preference
 $ErrorActionPreference = "Stop"
 
+# Ensure PackageManagement can install modules to CurrentUser without elevation.
+# Install-Module often fails with "Administrator rights are required" when the NuGet
+# provider is missing, because the provider bootstrap defaults to AllUsers scope.
+function Initialize-ModuleInstallEnvironment {
+    try {
+        # Gallery downloads require TLS 1.2 on older Windows / .NET defaults.
+        $tls = [Net.ServicePointManager]::SecurityProtocol
+        [Net.ServicePointManager]::SecurityProtocol = $tls -bor [Net.SecurityProtocolType]::Tls12
+    }
+    catch {
+        # Best-effort; Install-Module may still succeed on modern hosts.
+    }
+
+    try {
+        $nuget = Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue
+        if (-not $nuget -or [version]$nuget.Version -lt [version]'2.8.5.201') {
+            Write-Host "Bootstrapping NuGet package provider (CurrentUser)..." -ForegroundColor Cyan
+            $null = Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force -ErrorAction Stop
+        }
+    }
+    catch {
+        Write-Warning "Could not ensure NuGet package provider for CurrentUser: $_"
+        Write-Warning "If module install fails with 'Administrator rights are required', run once as a normal user: Install-PackageProvider -Name NuGet -Scope CurrentUser -Force"
+    }
+
+    try {
+        $gallery = Get-PSRepository -Name PSGallery -ErrorAction SilentlyContinue
+        if (-not $gallery) {
+            $null = Register-PSRepository -Default -ErrorAction Stop
+            $gallery = Get-PSRepository -Name PSGallery -ErrorAction Stop
+        }
+        if ($gallery.InstallationPolicy -ne 'Trusted') {
+            # Avoid interactive "Are you sure?" prompts during Install-Module -Force.
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction Stop
+        }
+    }
+    catch {
+        Write-Warning "Could not ensure PSGallery is registered/trusted: $_"
+    }
+}
+
 # Function to check, install, and import required modules into the current session.
 # Microsoft.Online.SharePoint.PowerShell is Windows PowerShell 5.1-native; on PowerShell 7+
 # it must be imported with -UseWindowsPowerShell or Connect/Disconnect-SPOService will not
@@ -76,28 +117,39 @@ function Install-RequiredModules {
         [string[]]$ModuleNames
     )
 
-    foreach ($moduleName in $ModuleNames) {
-        if (-not (Get-Module -ListAvailable -Name $moduleName)) {
-            Write-Host "Module '$moduleName' not found. Attempting to install..." -ForegroundColor Yellow
-            try {
-                # Prefer CurrentUser so elevation is not required. Suppress the common
-                # PackageManagement/NuGet bootstrap warning that still allows a CurrentUser install.
-                Install-Module -Name $moduleName -Scope CurrentUser -Force -AllowClobber -ErrorAction Stop
-                Write-Host "Module '$moduleName' installed successfully." -ForegroundColor Green
-            }
-            catch {
-                Write-Error "Failed to install module '$moduleName': $_"
-                Write-Error "If you see 'Administrator rights are required', close this session and re-run as a normal user with: Install-Module $moduleName -Scope CurrentUser -Force"
-                return $false
-            }
+    $needInstall = @($ModuleNames | Where-Object { -not (Get-Module -ListAvailable -Name $_) })
+    if ($needInstall.Count -gt 0) {
+        Initialize-ModuleInstallEnvironment
+    }
 
-            if (-not (Get-Module -ListAvailable -Name $moduleName)) {
-                Write-Error "Module '$moduleName' still not found after Install-Module. Install may have failed silently (often a NuGet provider / permissions issue)."
-                return $false
-            }
+    # Pass 1: install any missing modules before importing SPO (which may start a
+    # WinPSCompatSession on PS 7+ and can interfere with subsequent Install-Module).
+    foreach ($moduleName in $needInstall) {
+        Write-Host "Module '$moduleName' not found. Attempting to install..." -ForegroundColor Yellow
+        try {
+            Install-Module -Name $moduleName -Scope CurrentUser -Repository PSGallery `
+                -Force -AllowClobber -SkipPublisherCheck -ErrorAction Stop
+            Write-Host "Module '$moduleName' installed successfully." -ForegroundColor Green
+        }
+        catch {
+            Write-Error "Failed to install module '$moduleName': $_"
+            Write-Error @"
+Install without elevation (run as your normal user, not Administrator):
+  Install-PackageProvider -Name NuGet -Scope CurrentUser -Force
+  Install-Module -Name $moduleName -Scope CurrentUser -Repository PSGallery -Force -AllowClobber
+Then re-run this script.
+"@
+            return $false
         }
 
-        # Ensure the module is loaded in *this* session (ListAvailable alone is not enough).
+        if (-not (Get-Module -ListAvailable -Name $moduleName)) {
+            Write-Error "Module '$moduleName' still not found after Install-Module. Install may have failed silently (often a NuGet provider / permissions issue)."
+            return $false
+        }
+    }
+
+    # Pass 2: import into this session (ListAvailable alone is not enough).
+    foreach ($moduleName in $ModuleNames) {
         if (-not (Get-Module -Name $moduleName)) {
             try {
                 $importParams = @{
@@ -1091,7 +1143,12 @@ try {
     # Check and install required modules
     if ($UseCombined) {
         Write-Host "Checking for required modules (SPO + Graph)..." -ForegroundColor Cyan
-        $modulesInstalled = Install-RequiredModules -ModuleNames @('Microsoft.Online.SharePoint.PowerShell', 'Microsoft.Graph.Reports', 'Microsoft.Graph.Authentication')
+        # Install Graph modules before SPO so a PS7 WinPSCompatSession cannot block Install-Module.
+        $modulesInstalled = Install-RequiredModules -ModuleNames @(
+            'Microsoft.Graph.Reports',
+            'Microsoft.Graph.Authentication',
+            'Microsoft.Online.SharePoint.PowerShell'
+        )
         if (-not $modulesInstalled) {
             throw "Failed to install required modules for combined mode."
         }
