@@ -199,19 +199,23 @@ $outputPath = "\\fileserver\Reports\SharePoint\Usage_$monthYear.csv"
 ## Troubleshooting
 
 ### Issue: Module Installation Fails ("Administrator rights are required")
-The script tries `-Scope CurrentUser` first. If you are already in an elevated ("Run as Administrator") window — which is what often triggers this error even with CurrentUser — it automatically retries with `-Scope AllUsers`, then falls back to `Save-Module` into your user modules folder.
+The script always tries installs in this order:
+1. `Install-Module -Scope CurrentUser`
+2. `Install-Module -Scope AllUsers` (even if elevation detection fails)
+3. NuGet AllUsers re-bootstrap + AllUsers retry
+4. Windows PowerShell (`powershell.exe`) install when running in `pwsh`
+5. `Save-Module` into `%LOCALAPPDATA%\PowerShell\Modules` and `.\.psmodules`
 
-You do **not** need to elevate just to install modules. A normal user session with CurrentUser scope is preferred.
+Elevation is not required for CurrentUser installs, but an Administrator window is fine — AllUsers is attempted automatically.
 
-If auto-install still fails, run one of these once, then re-run the script:
-
-**Elevated session (matches an Administrator title bar):**
+If auto-install still fails, run this in the **same** window, then re-run the script:
 ```powershell
+Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope AllUsers -Force
 Install-Module -Name Microsoft.Graph.Reports, Microsoft.Graph.Authentication, Microsoft.Online.SharePoint.PowerShell `
     -Scope AllUsers -Repository PSGallery -Force -AllowClobber -SkipPublisherCheck
 ```
 
-**Normal (non-elevated) session:**
+Or in a normal (non-elevated) session:
 ```powershell
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Scope CurrentUser -Force
@@ -222,7 +226,7 @@ Install-Module -Name Microsoft.Graph.Reports, Microsoft.Graph.Authentication, Mi
 ### Which PowerShell should I use?
 - **Preferred for `-UseCombined` / default SPO mode**: Windows PowerShell 5.1 (`powershell.exe`), or the SharePoint Online Management Shell (same engine with SPO preinstalled).
 - **PowerShell 7+ (`pwsh`)**: Works. Graph mode is fine natively; SPO mode imports `Microsoft.Online.SharePoint.PowerShell` via `-UseWindowsPowerShell` (Windows only).
-- **Elevated sessions**: Supported for installs now (AllUsers fallback), but a normal user session is still preferred for day-to-day runs.
+- **Elevated sessions**: Supported (AllUsers is always attempted after CurrentUser).
 
 ### Issue: Authentication Fails
 **Solution**: Ensure you have the required permissions:
