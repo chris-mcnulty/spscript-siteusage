@@ -14,6 +14,11 @@ This PowerShell script enumerates usage reports from all SharePoint sites in a t
 
 ## Prerequisites
 
+### PowerShell host
+- **Preferred**: Windows PowerShell 5.1 (`powershell.exe`) or the SharePoint Online Management Shell
+- **Also supported**: PowerShell 7+ (`pwsh`) on Windows (SPO module loads via Windows PowerShell compatibility)
+- Do **not** elevate just to install modules; the script uses `-Scope CurrentUser`
+
 ### For SharePoint Online Management Shell Method (Default)
 - PowerShell 5.1 or later
 - Microsoft.Online.SharePoint.PowerShell module (auto-installed if missing)
